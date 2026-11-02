@@ -123,6 +123,13 @@ allowlisted users; don't enable automatic inferred work prematurely.
   A service connected to the same internal Docker network could otherwise
   bypass the outer Basic Auth and access the management API; isolate the
   deployment from untrusted containers.
+- The image build caches npm/pnpm downloads in BuildKit cache mounts on the
+  build server. Keep **Advanced > Build cache** on **Use Docker build cache**:
+  "Rebuild from scratch" / "Force deploy (without cache)" skip both the layer
+  cache and these mounts. Unchanged layers (apt, `dsh` install) are reused
+  entirely; the cache mounts speed up the `dsh` install when its layer reruns.
+  Because the upstream clone layer is cached too, use a forced rebuild to pick
+  up new `dsh-superagent-prototype` commits on `main`.
 - No real Docker build or live Coolify deployment was available in this
   environment; validate the deployed generated Caddy labels and auth behavior.
 

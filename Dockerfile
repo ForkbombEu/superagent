@@ -3,7 +3,6 @@
 # Secrets are passed only at runtime using Coolify Environment Variables.
 FROM node:24-bookworm
 
-ARG SUPERAGENT_REF=main
 ENV HOME=/home/agent \
     DSH_HOME=/home/agent/.dsh \
     DEBIAN_FRONTEND=noninteractive
@@ -24,15 +23,23 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Match the version in upstream docs/006-deployment.md.
-RUN npm install --global @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0
+# BuildKit cache mounts keep downloaded packages on the build host between
+# deployments (even when layers are rebuilt) and out of the image/volume.
+RUN --mount=type=cache,target=/var/cache/npm \
+    npm install --global --prefer-offline --cache /var/cache/npm \
+      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
     install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent
 
+# Declared here so changing the ref doesn't invalidate the apt/npm layers above.
+ARG SUPERAGENT_REF=main
 RUN git clone --depth 1 --branch "$SUPERAGENT_REF" \
       https://github.com/deepseek-ai/dsh-superagent-prototype.git /opt/dsh-superagent
 WORKDIR /opt/dsh-superagent
-RUN pnpm install --frozen-lockfile && pnpm build && \
+RUN --mount=type=cache,target=/var/cache/pnpm-store \
+    pnpm install --frozen-lockfile --prefer-offline --store-dir /var/cache/pnpm-store && \
+    pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh /usr/local/bin/

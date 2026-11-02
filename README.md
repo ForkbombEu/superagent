@@ -48,10 +48,17 @@ docker run --rm -it caddy:2.10-alpine caddy hash-password
 
 Enter a long random password at the hidden prompt. Copy the resulting
 `$2a$...` or `$2b$...` string into
-`BASIC_AUTH_PASSWORD_HASH` in Coolify. Keep the dollar characters unchanged.
+`BASIC_AUTH_PASSWORD_HASH` in Coolify. Keep the dollar characters unchanged
+and mark the variable **Is Literal** (developer view: `# coolify: literal`).
 The `compose.yaml` label references `${BASIC_AUTH_PASSWORD_HASH:?}` so the
-hash is inserted by Compose interpolation, not embedded in Git. If entering a
-literal hash directly in Compose labels instead, escape each `$` as `$$`.
+hash is inserted by Compose interpolation, not embedded in Git.
+
+**Required:** in the application's Coolify settings, turn **off**
+"Escape special characters in labels". It is on by default and rewrites every
+`$` in label values to `$$`, so Compose never interpolates the variable: Caddy
+receives the literal text `${BASIC_AUTH_PASSWORD_HASH:?}` as the hash and
+rejects every password. If entering a literal hash directly in Compose labels
+instead, keep the escaping on.
 
 The Basic Auth label on the **dashboard** service is:
 

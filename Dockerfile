@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+# Unofficial packaging of dsh-superagent-prototype for Coolify Docker Compose.
+# Secrets are passed only at runtime using Coolify Environment Variables.
+FROM node:24-bookworm
+
+ARG SUPERAGENT_REF=main
+ENV HOME=/home/agent \
+    DSH_HOME=/home/agent/.dsh \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      bash ca-certificates curl git git-lfs gnupg jq \
+      openssh-client procps python3 make g++ tmux socat; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*
+
+# Match the version in upstream docs/006-deployment.md.
+RUN npm install --global @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0
+
+RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
+    install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent
+
+RUN git clone --depth 1 --branch "$SUPERAGENT_REF" \
+      https://github.com/deepseek-ai/dsh-superagent-prototype.git /opt/dsh-superagent
+WORKDIR /opt/dsh-superagent
+RUN pnpm install --frozen-lockfile && pnpm build && \
+    chown -R agent:agent /opt/dsh-superagent /home/agent
+
+COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/gh-agent \
+    /usr/local/bin/superagent-entrypoint.sh \
+    /usr/local/bin/prepare-worktree.sh
+
+USER agent
+
+# Seed the DSH profile at image build time. On first use, Docker copies the
+# image's /home/agent contents into an empty named volume at that mountpoint.
+RUN set -eu; \
+    dsh superagent --from-default-profile web --dump-config > /dev/null; \
+    dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
+    mkdir -p "$DSH_HOME/state/superagent"; \
+    printf '%s\n' \
+      '- id: webserver' \
+      '  config:' \
+      '    host: 127.0.0.1' \
+      '    port: 3082' \
+      '- id: dsh-superagent' \
+      '  config:' \
+      '    stateDir: /home/agent/.dsh/state/superagent' \
+      > "$DSH_HOME/profiles/superagent/cordis.patch.yml"
+
+# The DSH management API requires a localhost Host header; do not put this
+# endpoint behind a public Coolify domain. Access it by SSH port-forwarding.
+EXPOSE 3083
+
+HEALTHCHECK --interval=30s --timeout=6s --start-period=120s --retries=4 \
+  CMD curl -fsS -H 'x-orchestrator-request: 1' \
+    http://127.0.0.1:3082/orchestrator/api/state > /dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/superagent-entrypoint.sh"]
+CMD ["dsh", "--profile", "superagent"]

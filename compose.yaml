@@ -1,0 +1,29 @@
+# Coolify > New > Git Repository > Build strategy: Compose.
+# Keep Docker Compose in Git; set secret variables in Coolify, not in the repo.
+services:
+  superagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SUPERAGENT_REF: main
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 5m
+    environment:
+      # Coolify marks these as required via ${VAR:?}.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
+      GH_TOKEN: ${GH_TOKEN:?}
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
+      DSH_TELEMETRY_MODE: DISABLED
+    volumes:
+      - superagent_home:/home/agent
+    tmpfs:
+      - /run/superagent-secrets:uid=10001,gid=10001,mode=0700
+    ports:
+      # Do NOT add a public Coolify domain. Open with SSH local forwarding.
+      # Port is bound to the Coolify host's loopback interface only.
+      - "127.0.0.1:${SUPERAGENT_HOST_PORT:-3082}:3083"
+
+volumes:
+  superagent_home:

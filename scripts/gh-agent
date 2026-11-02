@@ -1,0 +1,14 @@
+#!/bin/sh
+# Superagent strips GH_TOKEN/GITHUB_TOKEN from sandboxed setup/worker commands.
+# This dedicated wrapper reloads the agent token from ephemeral container tmpfs.
+set -eu
+file=/run/superagent-secrets/github-token
+if [ ! -s "$file" ]; then
+  echo 'GitHub agent credential unavailable: missing runtime token file' >&2
+  exit 1
+fi
+export GH_CONFIG_DIR="$HOME/.config/gh-agent"
+export GH_PROMPT_DISABLED=1
+export GH_TOKEN="$(cat "$file")"
+unset GITHUB_TOKEN
+exec /usr/bin/gh "$@"

@@ -1,0 +1,20 @@
+# Inner proxy for the Superagent management API.
+# HTTPS and HTTP Basic Auth are supplied by Coolify's OUTER Caddy proxy.
+# Never publish this listener directly to the Internet.
+:8080 {
+    @management path /orchestrator/api/*
+    handle @management {
+        reverse_proxy superagent:3083 {
+            # Superagent management API requires the *upstream* loopback host
+            # and rejects a browser's external Origin.
+            header_up Host 127.0.0.1:3082
+            header_up -Origin
+        }
+    }
+
+    handle {
+        # For the main DSH Web GUI, keep the browser Host and Origin.
+        # dsh --trusted-host allows that explicit public hostname.
+        reverse_proxy superagent:3083
+    }
+}

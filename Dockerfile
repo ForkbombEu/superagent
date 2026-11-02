@@ -58,8 +58,8 @@ RUN set -eu; \
       '    stateDir: /home/agent/.dsh/state/superagent' \
       > "$DSH_HOME/profiles/superagent/cordis.patch.yml"
 
-# The DSH management API requires a localhost Host header; do not put this
-# endpoint behind a public Coolify domain. Access it by SSH port-forwarding.
+# The main DSH webserver is loopback-only. The entrypoint uses socat
+# to expose port 3083 to the INTERNAL dashboard sidecar; no host port is published.
 EXPOSE 3083
 
 HEALTHCHECK --interval=30s --timeout=6s --start-period=120s --retries=4 \

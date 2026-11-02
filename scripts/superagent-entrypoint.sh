@@ -39,6 +39,6 @@ elif [ ! -d "$repo_checkout/.git" ]; then
   exit 1
 fi
 
-# DSH runs on localhost (3082); this port is only for the host's SSH tunnel.
+# DSH runs on localhost (3082); expose 3083 ONLY to the internal dashboard sidecar.
 socat TCP-LISTEN:3083,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:3082 &
 exec "$@"

@@ -1,5 +1,6 @@
-# Coolify > New > Git Repository > Build strategy: Compose.
-# Keep Docker Compose in Git; set secret variables in Coolify, not in the repo.
+# Coolify Git Repository > Build strategy: Compose.
+# In Coolify > Domains, point https://SUPERAGENT_DOMAIN to service "dashboard" on port 8080.
+# Coolify must be using its Caddy proxy (not Traefik).
 services:
   superagent:
     build:
@@ -10,8 +11,15 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 5m
+    command:
+      - dsh
+      - --profile
+      - superagent
+      - --public-url
+      - https://${SUPERAGENT_DOMAIN:?}/
+      - --trusted-host
+      - ${SUPERAGENT_DOMAIN:?}
     environment:
-      # Coolify marks these as required via ${VAR:?}.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
       GH_TOKEN: ${GH_TOKEN:?}
       GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
@@ -20,10 +28,24 @@ services:
       - superagent_home:/home/agent
     tmpfs:
       - /run/superagent-secrets:uid=10001,gid=10001,mode=0700
-    ports:
-      # Do NOT add a public Coolify domain. Open with SSH local forwarding.
-      # Port is bound to the Coolify host's loopback interface only.
-      - "127.0.0.1:${SUPERAGENT_HOST_PORT:-3082}:3083"
+    expose:
+      - "3083"  # Docker-internal only; no host port mapping
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    depends_on:
+      superagent:
+        condition: service_healthy
+    restart: unless-stopped
+    expose:
+      - "8080"
+    labels:
+      # Coolify generates caddy_0 route labels from the domain set on this
+      # dashboard service. This extra label protects that same route.
+      # Password MUST be a bcrypt hash, NOT plaintext.
+      - "caddy_0.basicauth.${BASIC_AUTH_USERNAME:-admin}=${BASIC_AUTH_PASSWORD_HASH:?}"
 
 volumes:
   superagent_home:

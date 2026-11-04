@@ -33,10 +33,16 @@ Create a Git-backed Docker Compose Application referencing `compose.yaml`.
 Keep Compose deployment in **normal/managed mode**, not Raw, so Coolify can
 connect the dashboard service to its proxy and generate the Caddy route.
 
-In Coolify **Domains**, create an HTTPS domain, e.g. `https://superagent.example.com`,
-assign it to the **`dashboard`** service on **internal port `8080`**.
-Do **not** attach the domain to `superagent`. Its hostname is the value of
-`DASHBOARD_DOMAIN` below; this includes a domain Coolify generated for you.
+In Coolify **Domains**, assign **one** HTTPS domain, e.g. `https://superagent.example.com`,
+to the **`dashboard`** service on **internal port `8080`**, or let Coolify
+generate one from its wildcard domain. Do **not** attach the domain to
+`superagent`. Coolify passes that domain to DSH through its magic variables
+`SERVICE_URL_DASHBOARD_8080` (for `--public-url`) and
+`SERVICE_FQDN_DASHBOARD_8080` (for `--trusted-host`), so there is nothing to
+keep in sync. After the first deploy, check under **Environment Variables**
+that `SERVICE_FQDN_DASHBOARD_8080` is the bare hostname: older Coolify
+versions include the scheme there, which DSH refuses at startup
+(`trustedHosts entry … is not a bare host[:port] authority`).
 
 Configure Environment Variables:
 
@@ -45,7 +51,6 @@ Configure Environment Variables:
 | `DEEPSEEK_API_KEY` | Model provider secret (runtime only) |
 | `GH_TOKEN` | GitHub classic PAT for dedicated agent account (runtime only) |
 | `GITHUB_REPOSITORY` | e.g. `ForkbombEu/credimi-attestbook` |
-| `DASHBOARD_DOMAIN` | Hostname of the Coolify domain assigned to the **`dashboard`** service, exactly, e.g. `superagent.example.com` (no `https://`, port or path). DSH trusts only this Host: any other answers 403 on `/api`, leaving the chat list empty and the plugin, model and preset pages failing |
 | `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` |
 | `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
 | `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
@@ -69,8 +74,8 @@ curl -i -H 'x-orchestrator-request: 1' https://superagent.example.com/orchestrat
 curl -i -X POST -H 'content-type: application/json' -d '{}' https://superagent.example.com/api/session/list
 ```
 
-A 403 from the last request means DSH does not trust the Host: set
-`DASHBOARD_DOMAIN` to the hostname you are opening and redeploy.
+A 403 from the last request means DSH does not trust the Host: open the
+dashboard through its Coolify domain, and redeploy after changing that domain.
 
 Open the launch URL from the `superagent` service log in Coolify, e.g.
 

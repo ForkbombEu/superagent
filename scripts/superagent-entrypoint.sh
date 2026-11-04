@@ -41,4 +41,7 @@ fi
 
 # DSH runs on localhost (3082); expose 3083 ONLY to the internal dashboard sidecar.
 socat TCP-LISTEN:3083,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:3082 &
+# Apply the environment's Superagent settings once DSH answers. The subshell
+# orphans it to tini (compose `init: true`), which reaps it when it finishes.
+( /usr/local/bin/superagent-configure & )
 exec "$@"

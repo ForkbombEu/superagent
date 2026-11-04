@@ -45,6 +45,13 @@ Configure Environment Variables:
 | `GH_TOKEN` | GitHub classic PAT for dedicated agent account (runtime only) |
 | `GITHUB_REPOSITORY` | e.g. `ForkbombEu/credimi-attestbook` |
 | `SUPERAGENT_DOMAIN` | Public hostname only, e.g. `superagent.example.com` (no https://, no path) |
+| `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` |
+| `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
+| `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
+| `SUPERAGENT_EXECUTOR_REASONING_EFFORT` | Optional. Executor reasoning effort; empty uses the model default |
+
+Provider and model ids are the ones the panel's model fields accept; the
+panel shows the DSH default as `provider / model`.
 
 **Security**: whoever can read the container log can read the launch-token
 URL and open the UI. The DSH workers execute code and have repository
@@ -70,19 +77,29 @@ DSH sets the session cookie and redirects to `/`. The token changes on every
 restart, but the cookie stays valid, so the log URL is only needed for a new
 browser or after 30 days.
 
-## 3. One-time Superagent configuration
+## 3. Superagent configuration
 
-Runtime env vars do not configure Superagent's internal GitHub Source, Policy
-allowlist, or Executor. In the DSH panel, configure:
+On every start, `scripts/superagent-configure` waits for DSH and saves these
+settings through the management API, so a new deployment starts configured:
 
-- Source GitHub repository and `/usr/local/bin/gh-agent`.
-- Eval > GitHub allowed users (your own GitHub account).
-- Executor directory `/home/agent/.dsh/state/superagent/work`,
-  prepare command `/usr/local/bin/prepare-worktree.sh` and worker concurrency.
-- Prompts and a review policy appropriate for your project.
+| Setting | Value |
+| --- | --- |
+| Sources > GitHub > Repository | `$GITHUB_REPOSITORY` |
+| Sources > GitHub > Agent GitHub CLI | `/usr/local/bin/gh-agent` |
+| Eval > On each Source > GitHub accounts that may originate work | `$SUPERAGENT_GITHUB_ALLOWED_USERS`, when set |
+| Execution > Executor model | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set |
+| Execution > Prepare command | `/usr/local/bin/prepare-worktree.sh` |
 
-Default proactive accept mode `observe` still accepts explicit requests from
-allowlisted users; don't enable automatic inferred work prematurely.
+These values win over panel edits: change them in Coolify and redeploy. An
+unset optional variable leaves its setting to the panel. The Ticket directory
+root stays empty, which already means `/home/agent/.dsh/state/superagent/work`.
+The script logs each save, or the reason a save was refused, with the
+prefix `superagent-configure:` in the `superagent` service log.
+
+Configure the rest in the panel: worker concurrency, prompts and a review
+policy appropriate for your project. Default proactive accept mode `observe`
+still accepts explicit requests from allowlisted users; don't enable automatic
+inferred work prematurely.
 
 ## 4. Operational notes and limitations
 

@@ -42,10 +42,12 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
-COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh /usr/local/bin/
+COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
+     scripts/superagent-configure /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
-    /usr/local/bin/prepare-worktree.sh
+    /usr/local/bin/prepare-worktree.sh \
+    /usr/local/bin/superagent-configure
 
 USER agent
 

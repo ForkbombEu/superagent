@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Apply Superagent settings from the environment through the loopback management API.
+
+superagent-entrypoint.sh starts this in the background next to DSH. On every start it
+converges these fields, overwriting panel edits of the same fields:
+
+- Source GitHub repository: $GITHUB_REPOSITORY; agent CLI: /usr/local/bin/gh-agent
+- Executor prepare command: /usr/local/bin/prepare-worktree.sh
+- Policy GitHub allowed list: $SUPERAGENT_GITHUB_ALLOWED_USERS, when set
+- Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
+  optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
+
+Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
+the loop re-reads settings after each save until nothing differs.
+"""
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = 'http://127.0.0.1:3082/orchestrator/api/'
+HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
+GH_CLI = '/usr/local/bin/gh-agent'
+PREPARE = '/usr/local/bin/prepare-worktree.sh'
+# DSH and dsh-superagent restarts each take well under a minute; this covers a slow first boot.
+DEADLINE_SECONDS = 900
+
+
+def log(message):
+    print(f'superagent-configure: {message}', file=sys.stderr, flush=True)
+
+
+class Unavailable(Exception):
+    """The management API is not answering, typically because dsh-superagent is (re)starting."""
+
+
+def call(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(API + path, data=data, method=method, headers=HEADERS)
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        # While the plugin restarts its route is gone and DSH's static fallback answers without JSON.
+        try:
+            return error.code, json.load(error)
+        except ValueError:
+            raise Unavailable(f'{method} {path}: HTTP {error.code}') from None
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise Unavailable(f'{method} {path}: {error}') from None
+
+
+def allowed_users():
+    raw = os.environ.get('SUPERAGENT_GITHUB_ALLOWED_USERS', '')
+    users = list(dict.fromkeys(login for login in re.split(r'[\s,]+', raw) if login))
+    return users or None
+
+
+def executor_model():
+    provider = os.environ.get('SUPERAGENT_EXECUTOR_PROVIDER', '').strip()
+    model = os.environ.get('SUPERAGENT_EXECUTOR_MODEL', '').strip()
+    effort = os.environ.get('SUPERAGENT_EXECUTOR_REASONING_EFFORT', '').strip()
+    if not (provider or model or effort):
+        return None
+    if not (provider and model):
+        sys.exit('superagent-configure: set both SUPERAGENT_EXECUTOR_PROVIDER and SUPERAGENT_EXECUTOR_MODEL')
+    return {'provider': provider, 'model': model, **({'reasoningEffort': effort} if effort else {})}
+
+
+def changes(view, users, model):
+    """Return (block, desired value, revision) for each block whose value differs, in setup order."""
+    github = next(source for source in view['sources'] if source['id'] == 'github')
+    policy, executor = view['blocks']['policy'], view['blocks']['executor']
+    wanted = [('source:github', github, {**github['value'], 'config': {
+        **github['value']['config'], 'repository': os.environ['GITHUB_REPOSITORY'], 'cli': GH_CLI}})]
+    if users is not None:
+        sources = policy['value']['sources']
+        part = {**sources.get('github', {}), 'allowed': [{'id': login} for login in users]}
+        wanted.append(('policy', policy, {**policy['value'], 'sources': {**sources, 'github': part}}))
+    wanted.append(('executor', executor, {**executor['value'], 'prepare': PREPARE, **({'model': model} if model else {})}))
+    return [(block, value, current['revision']) for block, current, value in wanted if current['value'] != value]
+
+
+def main():
+    users, model = allowed_users(), executor_model()
+    # Each block is saved at most once per run, so a value the API normalizes cannot loop.
+    saved, failed = set(), set()
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            status, view = call('GET', 'settings')
+            if status != 200:
+                raise Unavailable(f'GET settings: HTTP {status} {view.get("error", "")}')
+            pending = [change for change in changes(view, users, model) if change[0] not in saved | failed]
+            if not pending:
+                if failed:
+                    log(f'done; not applied: {", ".join(sorted(failed))}')
+                    return 1
+                log('settings match the environment' if not saved else f'done; saved {", ".join(sorted(saved))}')
+                return 0
+            block, value, revision = pending[0]
+            status, result = call('PUT', f'settings/{block}', {'value': value, 'revision': revision})
+            if status == 200:
+                saved.add(block)
+                log(f'saved {block}' + ('; dsh-superagent restarts' if result.get('restarting') else ''))
+                if result.get('restarting'):
+                    # Let the old instance stop before reading settings again.
+                    time.sleep(5)
+            elif status == 409:
+                log(f'{block} changed meanwhile; retrying')
+            else:
+                detail = result.get('setup', {}).get('detail') or result.get('issues') or ''
+                log(f'{block} refused (HTTP {status}): {result.get("error", "")} {detail}'.rstrip())
+                failed.add(block)
+        except Unavailable:
+            time.sleep(2)
+    log(f'gave up after {DEADLINE_SECONDS} s: the management API never accepted the settings')
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

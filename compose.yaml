@@ -24,6 +24,11 @@ services:
       GH_TOKEN: ${GH_TOKEN:?}
       GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
       DSH_TELEMETRY_MODE: DISABLED
+      # Optional Superagent settings applied on every start (scripts/superagent-configure).
+      SUPERAGENT_GITHUB_ALLOWED_USERS: ${SUPERAGENT_GITHUB_ALLOWED_USERS:-}
+      SUPERAGENT_EXECUTOR_PROVIDER: ${SUPERAGENT_EXECUTOR_PROVIDER:-}
+      SUPERAGENT_EXECUTOR_MODEL: ${SUPERAGENT_EXECUTOR_MODEL:-}
+      SUPERAGENT_EXECUTOR_REASONING_EFFORT: ${SUPERAGENT_EXECUTOR_REASONING_EFFORT:-}
     volumes:
       - superagent_home:/home/agent
     tmpfs:

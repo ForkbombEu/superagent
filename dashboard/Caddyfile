@@ -1,9 +1,21 @@
-# Inner proxy for the Superagent management API.
-# HTTPS and HTTP Basic Auth are supplied by Coolify's OUTER Caddy proxy.
+# Inner proxy in front of DSH. Coolify's outer Caddy terminates HTTPS.
 # Never publish this listener directly to the Internet.
 :8080 {
     @management path /orchestrator/api/*
     handle @management {
+        # The Superagent management API authenticates nothing itself: it trusts
+        # any request that looks like loopback, which the rewrite below forges.
+        # Admit only browsers holding a valid DSH session cookie (minted by the
+        # launch-token URL): DSH answers GET / with 200 for a valid cookie and
+        # 401 otherwise, and forward_auth returns that 401 to the client.
+        # Empty query: a stray ?token= on / would turn the check into a redirect.
+        forward_auth superagent:3083 {
+            uri /?
+        }
+        # Stripping Origin below disables Superagent's cross-site check; the
+        # browser's Fetch Metadata carries the same fact.
+        @crossSite header_regexp Sec-Fetch-Site ^(cross-site|same-site)$
+        respond @crossSite 403
         reverse_proxy superagent:3083 {
             # Superagent management API requires the *upstream* loopback host
             # and rejects a browser's external Origin.
@@ -14,7 +26,8 @@
 
     handle {
         # For the main DSH Web GUI, keep the browser Host and Origin.
-        # dsh --trusted-host allows that explicit public hostname.
+        # dsh --trusted-host allows that explicit public hostname; DSH itself
+        # enforces the launch token / session cookie on these routes.
         reverse_proxy superagent:3083
     }
 }

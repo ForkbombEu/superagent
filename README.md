@@ -1,23 +1,31 @@
-# DSH Superagent on Coolify with Caddy HTTP Basic Authentication
+# DSH Superagent on Coolify
 
-> Unofficial integration, **not end-to-end tested in Coolify**. This specifically
-> targets Coolify's **Caddy** reverse proxy. Traefik labels are different.
+> Unofficial integration. This specifically targets Coolify's **Caddy**
+> reverse proxy. Traefik labels are different.
 
 ## Architecture
 
 ```
 Browser (HTTPS)
-  -> Coolify Caddy proxy :443 [HTTP Basic Auth, caddy_0.basicauth...]
+  -> Coolify Caddy proxy :443
     -> dashboard (internal Caddy :8080)
        -> superagent:3083 (socat tunnel to DSH 127.0.0.1:3082)
 ```
 
-The inner proxy is necessary because the Superagent management API requires
-`Host: 127.0.0.1:3082` or `localhost:3082`, and an external browser `Origin`
-would otherwise return 403. Only management API traffic receives the adjusted
-headers. Other DSH UI traffic preserves the public Host, which `--trusted-host`
-allows. The external Basic Auth layer must cover **all** paths, including
-`/orchestrator/api/*` and WebSocket connections.
+Access is authenticated by DSH itself: the launch-token URL that DSH prints in
+the container log mints a signed, `HttpOnly`, `SameSite=Strict` session cookie
+(valid 30 days, kept across restarts). Without it the DSH UI and its `/api`
+answer 401.
+
+The Superagent management API (`/orchestrator/api/*`) performs no
+authentication of its own: it only accepts `Host: 127.0.0.1:3082` or
+`localhost:3082` and no foreign `Origin`, trusting that only local processes
+reach it. The inner proxy rewrites those headers so the browser panel works,
+and therefore must authenticate those requests itself. Before forwarding, it
+asks DSH whether the request carries a valid session cookie (`forward_auth`
+to `GET /`, which DSH answers with 200 or 401), and it rejects cross-site
+requests by their `Sec-Fetch-Site` header. Other DSH UI traffic keeps the
+public Host, which `--trusted-host` allows.
 
 ## 1. Configure Coolify
 
@@ -37,69 +45,30 @@ Configure Environment Variables:
 | `GH_TOKEN` | GitHub classic PAT for dedicated agent account (runtime only) |
 | `GITHUB_REPOSITORY` | e.g. `ForkbombEu/credimi-attestbook` |
 | `SUPERAGENT_DOMAIN` | Public hostname only, e.g. `superagent.example.com` (no https://, no path) |
-| `BASIC_AUTH_USERNAME` | HTTP Basic Auth username, e.g. `admin` |
-| `BASIC_AUTH_PASSWORD_HASH` | **bcrypt hash** (NOT a plaintext password) |
 
-Create a bcrypt hash locally (this prints only the hash, not the plaintext):
-
-```bash
-docker run --rm -it caddy:2.10-alpine caddy hash-password
-```
-
-Enter a long random password at the hidden prompt. Copy the resulting
-`$2a$...` or `$2b$...` string into
-`BASIC_AUTH_PASSWORD_HASH` in Coolify. Keep the dollar characters unchanged
-and mark the variable **Is Literal** (developer view: `# coolify: literal`).
-The `compose.yaml` label references `${BASIC_AUTH_PASSWORD_HASH:?}` so the
-hash is inserted by Compose interpolation, not embedded in Git.
-
-**Required:** in the application's Coolify settings, turn **off**
-"Escape special characters in labels". It is on by default and rewrites every
-`$` in label values to `$$`, so Compose never interpolates the variable: Caddy
-receives the literal text `${BASIC_AUTH_PASSWORD_HASH:?}` as the hash and
-rejects every password. If entering a literal hash directly in Compose labels
-instead, keep the escaping on.
-
-The Basic Auth label on the **dashboard** service is:
-
-```yaml
-labels:
-  - "caddy_0.basicauth.${BASIC_AUTH_USERNAME:-admin}=${BASIC_AUTH_PASSWORD_HASH:?}"
-```
-
-`caddy_0` is the **first** Coolify-generated Caddy domain. If the dashboard
-has multiple domains or the generated label starts `caddy_1=`, match that
-index instead. The label must be on the same container as the corresponding
-route; check the deployed labels in Coolify after saving.
-
-**Security**: Basic Auth is one shared credential, without MFA or individual
-accounts. Use HTTPS, a strong random password, and preferably a private access
-policy or IP allowlist as a second layer. The DSH workers execute code and
-have repository credentials. Do not directly publish 3082, 3083 or 8080.
+**Security**: whoever can read the container log can read the launch-token
+URL and open the UI. The DSH workers execute code and have repository
+credentials. Do not directly publish 3082, 3083 or 8080.
 
 ## 2. Deploy, validate and open
 
 Deploy the app from Coolify. When Caddy routes are ready:
 
 ```bash
-# Must be HTTP 401 before authentication:
+# Both must be HTTP 401 without the DSH session cookie:
 curl -I https://superagent.example.com/
-
-# Basic Auth must then pass; the DSH GUI may still require its own
-# launch-token / session-cookie flow:
-curl -I -u 'admin:YOUR_LONG_RANDOM_PASSWORD' https://superagent.example.com/
+curl -i -H 'x-orchestrator-request: 1' https://superagent.example.com/orchestrator/api/state
 ```
 
-Open `https://superagent.example.com/`, pass browser Basic Auth, and follow
-DSH's Web launch-token flow if prompted. The UI uses its own authenticated
-session separately from proxy Basic Auth. To inspect Superagent API errors,
-use the browser developer tools; `/orchestrator/api/state` should not fail
-with DSH's `Same-origin management request required` response after login.
+Open the launch URL from the `superagent` service log in Coolify, e.g.
 
-Check the **actual generated Caddy labels** under the dashboard service;
-Coolify's Caddy route must include the `basicauth` label and target port 8080.
-If the domain isn't accessible, verify the Coolify Caddy proxy and stack's
-network/route wiring before changing the DSH app.
+```
+dsh web: https://superagent.example.com/?token=...
+```
+
+DSH sets the session cookie and redirects to `/`. The token changes on every
+restart, but the cookie stays valid, so the log URL is only needed for a new
+browser or after 30 days.
 
 ## 3. One-time Superagent configuration
 
@@ -126,10 +95,9 @@ allowlisted users; don't enable automatic inferred work prematurely.
   URL. If your pinned DSH CLI version does not recognize those flags, you may
   need to upgrade its version rather than removing the host security check.
 - The management API's loopback check is intentionally rewritten by the inner
-  proxy. This is safe **only if every external access path is authenticated**.
-  A service connected to the same internal Docker network could otherwise
-  bypass the outer Basic Auth and access the management API; isolate the
-  deployment from untrusted containers.
+  proxy, which checks the DSH session cookie instead. A service connected to
+  the same internal Docker network can still reach `superagent:3083` directly
+  and bypass that check; isolate the deployment from untrusted containers.
 - The image build caches npm/pnpm downloads in BuildKit cache mounts on the
   build server. Keep **Advanced > Build cache** on **Use Docker build cache**:
   "Rebuild from scratch" / "Force deploy (without cache)" skip both the layer
@@ -137,11 +105,8 @@ allowlisted users; don't enable automatic inferred work prematurely.
   entirely; the cache mounts speed up the `dsh` install when its layer reruns.
   Because the upstream clone layer is cached too, use a forced rebuild to pick
   up new `dsh-superagent-prototype` commits on `main`.
-- No real Docker build or live Coolify deployment was available in this
-  environment; validate the deployed generated Caddy labels and auth behavior.
 
 References:
-- https://coolify.io/docs/core/networking/proxy/caddy/basic-auth
 - https://coolify.io/docs/applications/builds/docker-compose
 - https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/src/app/http.ts
 - https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/public-deployments.md

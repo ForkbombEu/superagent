@@ -41,11 +41,6 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
-    labels:
-      # Coolify generates caddy_0 route labels from the domain set on this
-      # dashboard service. This extra label protects that same route.
-      # Password MUST be a bcrypt hash, NOT plaintext.
-      - "caddy_0.basicauth.${BASIC_AUTH_USERNAME:-admin}=${BASIC_AUTH_PASSWORD_HASH:?}"
 
 volumes:
   superagent_home:

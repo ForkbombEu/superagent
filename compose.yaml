@@ -18,6 +18,10 @@ services:
       - dsh
       - --profile
       - superagent
+      # Claude Code subagent provider settings (permission mode and credentials).
+      # dsh options go before the web app's arguments below.
+      - --patch
+      - /etc/superagent/claude-code.patch.yml
       - --public-url
       - ${SERVICE_URL_DASHBOARD:-}
       - --trusted-host
@@ -27,6 +31,9 @@ services:
       GH_TOKEN: ${GH_TOKEN:?}
       GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
       DSH_TELEMETRY_MODE: DISABLED
+      # Claude Code PR reviewer credential: set one (superagent-entrypoint.sh requires it).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       # Coolify derives these from the dashboard's domain (declared below). They
       # are required at start by superagent-entrypoint.sh rather than with `:?`
       # here, so `docker compose build` does not depend on them.

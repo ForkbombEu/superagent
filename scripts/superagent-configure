@@ -9,6 +9,8 @@ converges these fields, overwriting panel edits of the same fields:
 - Policy GitHub allowed list: $SUPERAGENT_GITHUB_ALLOWED_USERS, when set
 - Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
   optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
+- Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, the Claude
+  Code review and squash-merge procedure
 
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
 the loop re-reads settings after each save until nothing differs.
@@ -25,6 +27,7 @@ API = 'http://127.0.0.1:3082/orchestrator/api/'
 HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
 GH_CLI = '/usr/local/bin/gh-agent'
 PREPARE = '/usr/local/bin/prepare-worktree.sh'
+DELIVERY = '/usr/local/share/superagent/delivery.md'
 # DSH and dsh-superagent restarts each take well under a minute; this covers a slow first boot.
 DEADLINE_SECONDS = 900
 
@@ -70,8 +73,8 @@ def executor_model():
     return {'provider': provider, 'model': model, **({'reasoningEffort': effort} if effort else {})}
 
 
-def changes(view, users, model):
-    """Return (block, desired value, revision) for each block whose value differs, in setup order."""
+def changes(view, prompts, users, model, delivery):
+    """Return (name, path, body) for each save whose value differs from the current one, in setup order."""
     github = next(source for source in view['sources'] if source['id'] == 'github')
     policy, executor = view['blocks']['policy'], view['blocks']['executor']
     wanted = [('source:github', github, {**github['value'], 'config': {
@@ -81,11 +84,19 @@ def changes(view, users, model):
         part = {**sources.get('github', {}), 'allowed': [{'id': login} for login in users]}
         wanted.append(('policy', policy, {**policy['value'], 'sources': {**sources, 'github': part}}))
     wanted.append(('executor', executor, {**executor['value'], 'prepare': PREPARE, **({'model': model} if model else {})}))
-    return [(block, value, current['revision']) for block, current, value in wanted if current['value'] != value]
+    pending = [(block, f'settings/{block}', {'value': value, 'revision': current['revision']})
+               for block, current, value in wanted if current['value'] != value]
+    current = prompts['current']
+    if current['config']['delivery'] != delivery:
+        pending.append(('prompts', 'prompts', {'config': {**current['config'], 'delivery': delivery},
+                                               'baseRevision': current['revision']}))
+    return pending
 
 
 def main():
     users, model = allowed_users(), executor_model()
+    with open(DELIVERY, encoding='utf-8') as file:
+        delivery = file.read().strip()
     # Each block is saved at most once per run, so a value the API normalizes cannot loop.
     saved, failed = set(), set()
     deadline = time.monotonic() + DEADLINE_SECONDS
@@ -94,15 +105,19 @@ def main():
             status, view = call('GET', 'settings')
             if status != 200:
                 raise Unavailable(f'GET settings: HTTP {status} {view.get("error", "")}')
-            pending = [change for change in changes(view, users, model) if change[0] not in saved | failed]
+            status, prompts = call('GET', 'prompts')
+            if status != 200:
+                raise Unavailable(f'GET prompts: HTTP {status} {prompts.get("error", "")}')
+            pending = [change for change in changes(view, prompts, users, model, delivery)
+                       if change[0] not in saved | failed]
             if not pending:
                 if failed:
                     log(f'done; not applied: {", ".join(sorted(failed))}')
                     return 1
                 log('settings match the environment' if not saved else f'done; saved {", ".join(sorted(saved))}')
                 return 0
-            block, value, revision = pending[0]
-            status, result = call('PUT', f'settings/{block}', {'value': value, 'revision': revision})
+            block, path, body = pending[0]
+            status, result = call('PUT', path, body)
             if status == 200:
                 saved.add(block)
                 log(f'saved {block}' + ('; dsh-superagent restarts' if result.get('restarting') else ''))

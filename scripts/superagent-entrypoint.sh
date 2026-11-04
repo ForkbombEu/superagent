@@ -7,6 +7,11 @@ umask 077
 : "${GITHUB_REPOSITORY:?Set GITHUB_REPOSITORY to OWNER/REPO}"
 : "${SERVICE_URL_DASHBOARD:?Assign a domain to the dashboard service in Coolify}"
 : "${SERVICE_FQDN_DASHBOARD:?Assign a domain to the dashboard service in Coolify}"
+# The Delivery requirements merge a PR only after a Claude Code review passes.
+[ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || {
+  echo 'Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for the Claude Code PR reviewer' >&2
+  exit 1
+}
 
 # Validate OWNER/REPO before deriving a local checkout path.
 python3 - "$GITHUB_REPOSITORY" <<'PY'
@@ -39,6 +44,15 @@ if [ ! -e "$repo_checkout" ]; then
 elif [ ! -d "$repo_checkout/.git" ]; then
   echo "Checkout path exists but is not a Git clone: $repo_checkout" >&2
   exit 1
+fi
+
+# A profile seeded by an image without the Claude Code bundle (an older
+# superagent_home volume) gets it once; fresh volumes have it from the image.
+bundle=${DSH_CLAUDE_CODE_BUNDLE%@*}
+if ! jq -e --arg bundle "$bundle" '.dependencies[$bundle]' \
+    "$DSH_HOME/profiles/superagent/package.json" > /dev/null; then
+  echo "Adding $DSH_CLAUDE_CODE_BUNDLE to the superagent profile"
+  dsh plugin --profile superagent add "$DSH_CLAUDE_CODE_BUNDLE"
 fi
 
 # DSH runs on localhost (3082); expose 3083 ONLY to the internal dashboard sidecar.

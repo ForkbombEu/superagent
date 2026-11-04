@@ -52,6 +52,7 @@ Configure Environment Variables:
 | `DEEPSEEK_API_KEY` | Model provider secret (runtime only) |
 | `GH_TOKEN` | GitHub classic PAT for dedicated agent account (runtime only) |
 | `GITHUB_REPOSITORY` | e.g. `ForkbombEu/credimi-attestbook` |
+| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token` |
 | `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` |
 | `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
 | `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
@@ -100,6 +101,7 @@ settings through the management API, so a new deployment starts configured:
 | Eval > On each Source > GitHub accounts that may originate work | `$SUPERAGENT_GITHUB_ALLOWED_USERS`, when set |
 | Execution > Executor model | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set |
 | Execution > Prepare command | `/usr/local/bin/prepare-worktree.sh` |
+| Prompts > Delivery requirements | [`prompts/delivery.md`](prompts/delivery.md): the Claude Code review and merge procedure below |
 
 These values win over panel edits: change them in Coolify and redeploy. An
 unset optional variable leaves its setting to the panel. The Ticket directory
@@ -112,7 +114,59 @@ policy appropriate for your project. Default proactive accept mode `observe`
 still accepts explicit requests from allowlisted users; don't enable automatic
 inferred work prematurely.
 
-## 4. Operational notes and limitations
+## 4. Claude Code review and automatic merge
+
+DeepSeek implements and opens the PR as the agent account. Before merging, the
+DeepSeek worker delegates a review of the PR's exact head commit to Claude Code
+through DSH's official Claude Code subagent bundle
+(`@deepseek-ai/dsh-subagent-claude-code`, the `subagent_claude_code` tool),
+then follows [`prompts/delivery.md`](prompts/delivery.md):
+
+```mermaid
+flowchart TD
+  A[Push, read PR head sha] --> B[subagent_claude_code: review sha]
+  B -->|VERDICT: FAIL| C[Fix verified blocking findings, push]
+  C --> A
+  B -->|failed, aborted, unclear verdict| D[One retry, then report blocked]
+  B -->|VERDICT: PASS + REVIEWED_SHA = sha| E[Mark draft ready, report ready]
+  E --> F{head still sha, required checks passed, no changes requested?}
+  F -->|checks pending| F
+  F -->|check failed or head changed| C
+  F -->|yes| G["gh pr merge --squash --match-head-commit sha"]
+```
+
+- At most three failing reviews per PR; then the worker reports blocked and
+  leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
+  branch protection; a merge GitHub refuses is reported, not retried.
+- Claude Code runs in the worker's Ticket directory with
+  `permissionMode: dontAsk` (`claude-code/claude-code.patch.yml`, passed to DSH
+  with `--patch`) and the managed policy
+  [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
+  installed as `/etc/claude-code/managed-settings.json`: it may read files and
+  run read-only `git` commands only, and the repository's own `.claude/`
+  settings, hooks and MCP servers cannot widen that.
+- The merge uses the agent account's existing `gh`, so the account needs
+  merge rights. Enable squash merging in the repository, and require status
+  checks in branch protection for the CI gate to mean anything; do not require
+  approving reviews, which the agent account cannot give itself.
+- These are prompt instructions to the DeepSeek worker, not a guarantee
+  enforced by code: the worker could merge without a review. Branch protection
+  is the enforced part (CI, no force pushes to the base branch).
+
+The target repository's `AGENTS.md` must not forbid agents from merging. If it
+does, replace that rule with:
+
+```markdown
+## Merging
+
+Pull requests opened by the dsh-superagent agent account are merged by that
+agent automatically, without a human, once a Claude Code review of the exact
+head commit passes and all required CI checks pass, following the Delivery
+requirements of the dsh-superagent deployment. Agents never merge any other
+pull request, never use `--admin`, and never bypass branch protection.
+```
+
+## 5. Operational notes and limitations
 
 - Keep existing service name `superagent` and volume `superagent_home` when
   migrating from the previous package. Docker Compose/Coolify may still

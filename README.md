@@ -36,11 +36,12 @@ connect the dashboard service to its proxy and generate the Caddy route.
 In Coolify **Domains**, assign **one** HTTPS domain, e.g. `https://superagent.example.com`,
 to the **`dashboard`** service on **internal port `8080`**, or let Coolify
 generate one from its wildcard domain. Do **not** attach the domain to
-`superagent`. Coolify passes that domain to DSH through its magic variables
-`SERVICE_URL_DASHBOARD_8080` (for `--public-url`) and
-`SERVICE_FQDN_DASHBOARD_8080` (for `--trusted-host`), so there is nothing to
-keep in sync. After the first deploy, check under **Environment Variables**
-that `SERVICE_FQDN_DASHBOARD_8080` is the bare hostname: older Coolify
+`superagent`. `compose.yaml` declares `SERVICE_URL_DASHBOARD_8080` on the
+dashboard (the suffix selects port 8080), and Coolify derives
+`SERVICE_URL_DASHBOARD` (for `--public-url`) and `SERVICE_FQDN_DASHBOARD`
+(for `--trusted-host`) from its domain, so there is nothing to keep in sync.
+After the first deploy, check under **Environment Variables** that
+`SERVICE_FQDN_DASHBOARD` is the bare hostname: older Coolify
 versions include the scheme there, which DSH refuses at startup
 (`trustedHosts entry … is not a bare host[:port] authority`).
 

@@ -5,6 +5,8 @@ umask 077
 : "${DEEPSEEK_API_KEY:?Set DEEPSEEK_API_KEY in Coolify Environment Variables}"
 : "${GH_TOKEN:?Set a classic GitHub personal access token in Coolify Environment Variables}"
 : "${GITHUB_REPOSITORY:?Set GITHUB_REPOSITORY to OWNER/REPO}"
+: "${SERVICE_URL_DASHBOARD:?Assign a domain to the dashboard service in Coolify}"
+: "${SERVICE_FQDN_DASHBOARD:?Assign a domain to the dashboard service in Coolify}"
 
 # Validate OWNER/REPO before deriving a local checkout path.
 python3 - "$GITHUB_REPOSITORY" <<'PY'

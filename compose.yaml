@@ -1,5 +1,6 @@
 # Coolify Git Repository > Build strategy: Compose.
-# In Coolify > Domains, point https://SUPERAGENT_DOMAIN to service "dashboard" on port 8080.
+# In Coolify > Domains, assign https://DASHBOARD_DOMAIN to service "dashboard" on port 8080;
+# DASHBOARD_DOMAIN must be exactly that hostname, or DSH answers 403 on /api.
 # Coolify must be using its Caddy proxy (not Traefik).
 services:
   superagent:
@@ -16,9 +17,9 @@ services:
       - --profile
       - superagent
       - --public-url
-      - https://${SUPERAGENT_DOMAIN:?}/
+      - https://${DASHBOARD_DOMAIN:?Set DASHBOARD_DOMAIN to the hostname of the Coolify domain of the dashboard service}/
       - --trusted-host
-      - ${SUPERAGENT_DOMAIN:?}
+      - ${DASHBOARD_DOMAIN:?Set DASHBOARD_DOMAIN to the hostname of the Coolify domain of the dashboard service}
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
       GH_TOKEN: ${GH_TOKEN:?}

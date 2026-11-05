@@ -34,6 +34,9 @@ services:
       # Claude Code PR reviewer credential: set one (superagent-entrypoint.sh requires it).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Optional Claude Code reviewer model and effort (claude-code/claude-code.patch.yml).
+      SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
+      SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
       # Coolify derives these from the dashboard's domain (declared below). They
       # are required at start by superagent-entrypoint.sh rather than with `:?`
       # here, so `docker compose build` does not depend on them.

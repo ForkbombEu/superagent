@@ -12,6 +12,10 @@ umask 077
   echo 'Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN for the Claude Code PR reviewer' >&2
   exit 1
 }
+case "${SUPERAGENT_REVIEWER_EFFORT:-}" in
+  ''|low|medium|high|xhigh|max) ;;
+  *) echo 'SUPERAGENT_REVIEWER_EFFORT must be low, medium, high, xhigh or max' >&2; exit 1 ;;
+esac
 
 # Validate OWNER/REPO before deriving a local checkout path.
 python3 - "$GITHUB_REPOSITORY" <<'PY'

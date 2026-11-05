@@ -6,6 +6,14 @@
   config:
     # Deny every operation the managed settings do not pre-approve.
     permissionMode: dontAsk
+    # Reviewer model, e.g. `opus`, `sonnet` or a full model id; unset uses Claude
+    # Code's default for the account.
+    model: !!js "process.env.SUPERAGENT_REVIEWER_MODEL || undefined"
     # The provider scrubs credentials from the inherited environment; pass whichever
-    # Claude Code credential the deployment sets, never writing it to disk.
-    env: !!js "Object.fromEntries(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'].filter(name => process.env[name]).map(name => [name, process.env[name]]))"
+    # Claude Code credential the deployment sets, never writing it to disk, and the
+    # reviewer's effort level as CLAUDE_CODE_EFFORT_LEVEL when set.
+    env: !!js |-
+      Object.fromEntries([
+        ...['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'].map(name => [name, process.env[name]]),
+        ['CLAUDE_CODE_EFFORT_LEVEL', process.env.SUPERAGENT_REVIEWER_EFFORT],
+      ].filter(([, value]) => value))

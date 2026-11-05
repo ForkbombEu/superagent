@@ -143,6 +143,9 @@ flowchart TD
   Claude Code blocks a PR whose title does not, and only notes a
   non-conforming commit message: the squash commit on the base branch takes
   its subject from the reviewed title.
+- Each PR description names the issues it resolves with `Closes #<n>`, so
+  GitHub closes them when the PR merges; an issue a PR only advances gets
+  `Refs #<n>` and stays open.
 - At most three failing reviews per PR; then the worker reports blocked and
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.

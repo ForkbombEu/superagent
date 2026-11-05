@@ -22,12 +22,13 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends gh; \
     rm -rf /var/lib/apt/lists/*
 
-# Match the version in upstream docs/006-deployment.md.
+# Match the version in upstream docs/006-deployment.md. Claude Code is the PR
+# reviewer that scripts/claude-review runs.
 # BuildKit cache mounts keep downloaded packages on the build host between
 # deployments (even when layers are rebuilt) and out of the image/volume.
 RUN --mount=type=cache,target=/var/cache/npm \
     npm install --global --prefer-offline --cache /var/cache/npm \
-      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0
+      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
     install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent
@@ -43,21 +44,17 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
-     scripts/superagent-configure /usr/local/bin/
+     scripts/superagent-configure scripts/claude-review /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
-    /usr/local/bin/superagent-configure
+    /usr/local/bin/superagent-configure \
+    /usr/local/bin/claude-review
 # Claude Code PR review: the read-only policy (managed settings take precedence over
-# user and repository settings), the provider overlay passed with --patch, and the
+# user and repository settings) and the review prompt claude-review sends, and the
 # Delivery requirements that superagent-configure saves.
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
-COPY claude-code/claude-code.patch.yml /etc/superagent/claude-code.patch.yml
-COPY prompts/delivery.md /usr/local/share/superagent/delivery.md
-
-# Official on-demand DSH bundle providing the subagent_claude_code tool; its version
-# must match the dsh CLI above. The entrypoint adds it to older profiles too.
-ENV DSH_CLAUDE_CODE_BUNDLE=@deepseek-ai/dsh-subagent-claude-code@0.2.1-rc.3
+COPY claude-code/review-prompt.md prompts/delivery.md /usr/local/share/superagent/
 
 USER agent
 
@@ -66,7 +63,6 @@ USER agent
 RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
-    dsh plugin --profile superagent add "$DSH_CLAUDE_CODE_BUNDLE"; \
     mkdir -p "$DSH_HOME/state/superagent"; \
     printf '%s\n' \
       '- id: webserver' \

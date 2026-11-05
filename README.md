@@ -121,27 +121,43 @@ inferred work prematurely.
 ## 4. Claude Code review and automatic merge
 
 DeepSeek implements and opens the PR as the agent account. Before merging, the
-DeepSeek worker delegates a review of the PR's exact head commit to Claude Code
-through DSH's official Claude Code subagent bundle
-(`@deepseek-ai/dsh-subagent-claude-code`, the `subagent_claude_code` tool),
-then follows [`prompts/delivery.md`](prompts/delivery.md):
+DeepSeek worker runs [`claude-review`](scripts/claude-review) on the PR's exact
+head commit, then follows [`prompts/delivery.md`](prompts/delivery.md):
 
 ```mermaid
 flowchart TD
-  A[Push, read PR head sha] --> B[subagent_claude_code: review sha]
-  B -->|VERDICT: FAIL| C[Fix verified blocking findings, push]
+  A[Push, read PR head sha] --> B[claude-review repo pr sha]
+  B -->|exit 1: FAIL| C[Fix verified blocking findings, push]
   C --> A
-  B -->|failed, aborted, unclear verdict| D[One retry, then report blocked]
-  B -->|VERDICT: PASS + REVIEWED_SHA = sha| E[Mark draft ready, report ready]
-  E --> F{head still sha, required checks passed, no changes requested?}
+  B -->|other exit: no review| D[One retry, then report blocked]
+  B -->|exit 0: PASS| E[Mark draft ready, report ready]
+  E --> F{head and title still reviewed, required checks passed, no changes requested?}
   F -->|checks pending| F
   F -->|check failed or head changed| C
   F -->|yes| G["gh pr merge --squash --match-head-commit sha --subject 'title (#n)'"]
 ```
 
-- Every review that ends with a verdict is posted on the PR, verbatim, as a
-  `**Claude Code review** of <sha>` comment by the agent account, so the PR
-  keeps the record of each round.
+`claude-review` is a command rather than DSH's official Claude Code subagent
+tool because dsh-superagent limits its workers to a fixed list of tools
+(`WORK_TOOLS` in its `src/app/sessions.ts`), which hides that tool from them.
+The command:
+
+- checks that the sha is both the PR's head on GitHub and the checked-out
+  commit, and reads the PR's title and base branch itself;
+- runs the Claude Code CLI (`@anthropic-ai/claude-code`, installed in the
+  image) with the fixed review task in
+  [`claude-code/review-prompt.md`](claude-code/review-prompt.md), so DeepSeek
+  cannot change what Claude is asked or conclude for it;
+- accepts only an answer ending in `VERDICT: PASS|FAIL` and
+  `REVIEWED_SHA: <that sha>`, posts it verbatim on the PR as a
+  `**Claude Code review** of <sha>` comment, the record of each round, and
+  exits 0 for PASS, 1 for FAIL, 2 when there is no usable review (nothing
+  posted, for example a timeout after 30 minutes) and 3 when the comment could
+  not be posted;
+- reads the Claude credential, `SUPERAGENT_REVIEWER_MODEL` and
+  `SUPERAGENT_REVIEWER_EFFORT` from `/run/superagent-secrets/claude-review.json`,
+  which the entrypoint writes to the container's tmpfs: DSH strips variables
+  named `*_KEY`/`*_TOKEN` from worker shells.
 - Commit messages and PR titles follow
   [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
   Claude Code blocks a PR whose title does not, and only notes a
@@ -164,8 +180,7 @@ flowchart TD
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.
 - Claude Code runs in the worker's Ticket directory with
-  `permissionMode: dontAsk` (`claude-code/claude-code.patch.yml`, passed to DSH
-  with `--patch`) and the managed policy
+  `--permission-mode dontAsk` and the managed policy
   [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
   installed as `/etc/claude-code/managed-settings.json`: it may read files and
   run read-only `git` commands only, and the repository's own `.claude/`

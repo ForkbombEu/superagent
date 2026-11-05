@@ -18,10 +18,6 @@ services:
       - dsh
       - --profile
       - superagent
-      # Claude Code subagent provider settings (permission mode and credentials).
-      # dsh options go before the web app's arguments below.
-      - --patch
-      - /etc/superagent/claude-code.patch.yml
       - --public-url
       - ${SERVICE_URL_DASHBOARD:-}
       - --trusted-host
@@ -34,7 +30,7 @@ services:
       # Claude Code PR reviewer credential: set one (superagent-entrypoint.sh requires it).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      # Optional Claude Code reviewer model and effort (claude-code/claude-code.patch.yml).
+      # Optional Claude Code reviewer model and effort (scripts/claude-review).
       SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
       # Coolify derives these from the dashboard's domain (declared below). They

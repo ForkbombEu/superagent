@@ -32,6 +32,19 @@ install -m 0600 /dev/null /run/superagent-secrets/github-token
 printf '%s' "$GH_TOKEN" > /run/superagent-secrets/github-token
 unset GH_TOKEN GITHUB_TOKEN
 
+# claude-review reads the Claude Code credential, model and effort from here:
+# DSH strips *_KEY/*_TOKEN variables from worker shells, and neither DSH nor
+# DeepSeek needs them in their environment.
+install -m 0600 /dev/null /run/superagent-secrets/claude-review.json
+python3 > /run/superagent-secrets/claude-review.json <<'PY'
+import json, os
+credentials = {name: os.environ[name] for name in ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN') if os.environ.get(name)}
+effort = os.environ.get('SUPERAGENT_REVIEWER_EFFORT')
+print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
+                  'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}))
+PY
+unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+
 # Use exactly the agent identity supplied by the token; never interactive login.
 /usr/local/bin/gh-agent api user --jq .login > /dev/null || {
   echo 'GitHub authentication failed; verify GH_TOKEN (classic PAT).' >&2
@@ -48,15 +61,6 @@ if [ ! -e "$repo_checkout" ]; then
 elif [ ! -d "$repo_checkout/.git" ]; then
   echo "Checkout path exists but is not a Git clone: $repo_checkout" >&2
   exit 1
-fi
-
-# A profile seeded by an image without the Claude Code bundle (an older
-# superagent_home volume) gets it once; fresh volumes have it from the image.
-bundle=${DSH_CLAUDE_CODE_BUNDLE%@*}
-if ! jq -e --arg bundle "$bundle" '.dependencies[$bundle]' \
-    "$DSH_HOME/profiles/superagent/package.json" > /dev/null; then
-  echo "Adding $DSH_CLAUDE_CODE_BUNDLE to the superagent profile"
-  dsh plugin --profile superagent add "$DSH_CLAUDE_CODE_BUNDLE"
 fi
 
 # DSH runs on localhost (3082); expose 3083 ONLY to the internal dashboard sidecar.

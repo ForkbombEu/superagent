@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Claude Code review of one pull request commit, for dsh-superagent workers.
+
+Usage, in the ticket directory: claude-review <owner/repo> <pr number> <head sha>
+
+dsh-superagent limits its workers to a fixed tool list without the DSH Claude Code subagent tool, so they
+run this through bash instead. It checks that <head sha> is both the PR's head on
+GitHub and the checked-out HEAD, runs Claude Code read-only on it with the prompt
+in /usr/local/share/superagent/review-prompt.md, posts an answer that ends with a
+verdict on the PR as the review record, and prints it.
+
+Exit status: 0 PASS, 1 FAIL, 2 no usable review (nothing posted), 3 review done
+but the comment could not be posted.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+PROMPT = '/usr/local/share/superagent/review-prompt.md'
+# Written by superagent-entrypoint.sh: the Claude credential, model and effort,
+# which DSH strips from worker shells as it does every *_TOKEN/*_KEY variable.
+CONFIG = '/run/superagent-secrets/claude-review.json'
+DISCLOSURE = 'This is by an automated agent, not a human.'
+TIMEOUT_SECONDS = 1800
+# GitHub rejects comments over 65536 characters.
+MAX_ANSWER = 60000
+
+
+def fail(message, status=2):
+    print(f'claude-review: {message}', file=sys.stderr)
+    sys.exit(status)
+
+
+def run(*command):
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        fail(f'{" ".join(command[:3])} failed: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def main():
+    if len(sys.argv) != 4 or not re.fullmatch(r'[0-9a-f]{40}', sys.argv[3]):
+        fail('usage: claude-review <owner/repo> <pr number> <full 40-character head sha>')
+    repository, number, sha = sys.argv[1:]
+    pr = json.loads(run('gh', 'pr', 'view', number, '--repo', repository, '--json', 'headRefOid,baseRefName,title'))
+    if pr['headRefOid'] != sha:
+        fail(f'the PR head is {pr["headRefOid"]}, not {sha}: review the current head')
+    if run('git', 'rev-parse', 'HEAD') != sha:
+        fail(f'the working directory is not at {sha}')
+    run('git', 'fetch', '--no-tags', 'origin', pr['baseRefName'])
+
+    values = {'<repository>': repository, '<number>': number, '<title>': pr['title'], '<base branch>': pr['baseRefName'], '<sha>': sha}
+    with open(PROMPT, encoding='utf-8') as file:
+        prompt = re.sub('|'.join(map(re.escape, values)), lambda match: values[match.group(0)], file.read())
+    with open(CONFIG, encoding='utf-8') as file:
+        config = json.load(file)
+    command = ['claude', '-p', prompt, '--output-format', 'json', '--permission-mode', 'dontAsk',
+               *(['--model', config['model']] if config.get('model') else [])]
+    # GitHub tokens stay out of Claude Code's environment.
+    inherited = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
+                                env={**inherited, **config['env']})
+    except subprocess.TimeoutExpired:
+        fail(f'Claude Code did not finish within {TIMEOUT_SECONDS} s')
+    try:
+        output = json.loads(result.stdout)
+    except ValueError:
+        fail(f'Claude Code failed (exit {result.returncode}): {result.stderr.strip()[-2000:]}')
+    answer = (output.get('result') or '').strip()
+    if output.get('is_error') or not answer:
+        fail(f'Claude Code returned no review: {output.get("subtype")} {answer[-2000:]}'.rstrip())
+
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    verdict = re.fullmatch(r'VERDICT: (PASS|FAIL)', lines[-2]) if len(lines) >= 2 else None
+    if not verdict or lines[-1] != f'REVIEWED_SHA: {sha}':
+        print(answer)
+        fail('the answer does not end with a verdict for this commit; not posted')
+
+    shown = answer if len(answer) <= MAX_ANSWER else answer[:MAX_ANSWER] + '\n\n(The review was truncated to fit a GitHub comment.)'
+    body = f'{DISCLOSURE}\n\n**Claude Code review** of {sha}\n\n{shown}\n'
+    posted = subprocess.run(['gh', 'pr', 'comment', number, '--repo', repository, '--body-file', '-'],
+                            input=body, capture_output=True, text=True)
+    print(answer)
+    passed = verdict.group(1) == 'PASS'
+    print(f'\nclaude-review: {verdict.group(1)} for {sha}, title: {pr["title"]}')
+    if posted.returncode:
+        fail(f'the review could not be posted: {posted.stderr.strip()}', 3)
+    sys.exit(0 if passed else 1)
+
+
+if __name__ == '__main__':
+    main()

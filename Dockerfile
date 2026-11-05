@@ -23,12 +23,13 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Match the version in upstream docs/006-deployment.md. Claude Code is the PR
-# reviewer that scripts/claude-review runs.
+# reviewer that scripts/claude-review runs; Bun runs the target repository's
+# tests for the workers and the reviewer.
 # BuildKit cache mounts keep downloaded packages on the build host between
 # deployments (even when layers are rebuilt) and out of the image/volume.
 RUN --mount=type=cache,target=/var/cache/npm \
     npm install --global --prefer-offline --cache /var/cache/npm \
-      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
+      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318 bun@1.3.1
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
     install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent
@@ -50,7 +51,7 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
     /usr/local/bin/claude-review
-# Claude Code PR review: the read-only policy (managed settings take precedence over
+# Claude Code PR review: the reviewer's permission policy (managed settings take precedence over
 # user and repository settings) and the review prompt claude-review sends, and the
 # Delivery requirements that superagent-configure saves.
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json

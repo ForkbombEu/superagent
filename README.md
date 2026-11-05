@@ -179,12 +179,19 @@ The command:
 - At most three failing reviews per PR; then the worker reports blocked and
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.
-- Claude Code runs in the worker's Ticket directory with
-  `--permission-mode dontAsk` and the managed policy
+- Claude Code runs in a temporary checkout of the reviewed commit, deleted
+  afterwards, with `--permission-mode dontAsk` and the managed policy
   [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
-  installed as `/etc/claude-code/managed-settings.json`: it may read files and
-  run read-only `git` commands only, and the repository's own `.claude/`
-  settings, hooks and MCP servers cannot widen that.
+  installed as `/etc/claude-code/managed-settings.json`. It may read files, run
+  read-only `git` and inspection commands, install dependencies and run tests,
+  type checks and builds (`npm`, `npx`, `node`, `pnpm`, `bun`, `make`,
+  `pytest`), and read the PR, issues and CI runs with read-only `gh`
+  subcommands. File edits, `git commit`/`push`, `gh api` and every `gh`
+  subcommand that writes are denied, and the repository's own `.claude/`
+  settings, hooks and MCP servers cannot widen that. Running the PR's tests
+  runs the PR's code with the agent account's credentials available, as the
+  DeepSeek worker already does: the `gh` limits stop Claude from writing, not
+  code it executes.
 - The merge uses the agent account's existing `gh`, so the account needs
   merge rights. Enable squash merging in the repository, and require status
   checks in branch protection for the CI gate to mean anything; do not require

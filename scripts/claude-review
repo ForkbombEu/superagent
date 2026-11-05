@@ -3,10 +3,11 @@
 
 Usage, in the ticket directory: claude-review <owner/repo> <pr number> <head sha>
 
-dsh-superagent limits its workers to a fixed tool list without the DSH Claude Code subagent tool, so they
-run this through bash instead. It checks that <head sha> is both the PR's head on
-GitHub and the checked-out HEAD, runs Claude Code read-only on it with the prompt
-in /usr/local/share/superagent/review-prompt.md, posts an answer that ends with a
+dsh-superagent limits its workers to a fixed tool list without the DSH Claude Code
+subagent tool, so they run this through bash instead. It checks that <head sha> is
+both the PR's head on GitHub and the checked-out HEAD, runs Claude Code on it in a
+temporary checkout, where it may run the tests, with the prompt in
+/usr/local/share/superagent/review-prompt.md, posts an answer that ends with a
 verdict on the PR as the review record, and prints it.
 
 Exit status: 0 PASS, 1 FAIL, 2 no usable review (nothing posted), 3 review done
@@ -15,8 +16,10 @@ but the comment could not be posted.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 PROMPT = '/usr/local/share/superagent/review-prompt.md'
 # Written by superagent-entrypoint.sh: the Claude credential, model and effort,
@@ -60,11 +63,18 @@ def main():
                *(['--model', config['model']] if config.get('model') else [])]
     # GitHub tokens stay out of Claude Code's environment.
     inherited = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+    # A detached checkout of <sha> of its own: installing dependencies and running
+    # tests leave the worker's directory alone, and the checkout is deleted after.
+    checkout = tempfile.mkdtemp(prefix='claude-review-')
+    run('git', 'worktree', 'add', '--detach', checkout, sha)
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
-                                env={**inherited, **config['env']})
+                                cwd=checkout, env={**inherited, **config['env']})
     except subprocess.TimeoutExpired:
         fail(f'Claude Code did not finish within {TIMEOUT_SECONDS} s')
+    finally:
+        subprocess.run(['git', 'worktree', 'remove', '--force', checkout], capture_output=True)
+        shutil.rmtree(checkout, ignore_errors=True)
     try:
         output = json.loads(result.stdout)
     except ValueError:

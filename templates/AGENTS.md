@@ -33,9 +33,15 @@ dependencies, standards to follow, what must never be done. One bullet each. -->
 ## Code and tests
 
 - Every change comes with tests that exercise it, and the existing tests pass.
-- The toolchain (runtimes, package managers, CLIs) is pinned in `mise.toml` at
-  the repository root, and CI uses the same versions. Change a version there,
-  in the same pull request as anything that needs it.
+- The toolchain (runtimes, package managers, CLIs) is managed with
+  [mise](https://mise.jdx.dev/) and pinned in `mise.toml` at the repository
+  root; CI uses the same versions. Before installing dependencies, running
+  tests, linters, type checks or builds, run `mise install` in the checkout,
+  then use the tools it provides (through mise's shims on `PATH`, or
+  `mise exec -- <command>`); never rely on a version installed some other way,
+  and never install a runtime globally. A tool the work needs is added to
+  `mise.toml`, and a version changed there, in the same pull request as the
+  code that needs it.
 - Keep changes within the scope of their issue; record anything else found on
   the way as a new issue instead of fixing it in the same pull request.
 - Never commit secrets, credentials or personal data, and never deploy to
@@ -91,9 +97,10 @@ Opening a backlog:
 
 1. Break the work into issues as above and order them so each one's
    prerequisites come before it; there must be no cycles.
-2. Make the first issue set up the build, the test suite and a CI workflow,
-   and make that workflow's checks required on the default branch, so every
-   later merge has to pass them.
+2. Make the first issue set up `mise.toml` with the toolchain, the build, the
+   test suite and a CI workflow that installs the same versions from
+   `mise.toml` (for example with `jdx/mise-action`), and make that workflow's
+   checks required on the default branch, so every later merge has to pass them.
 3. Create the issues in that order with
    `gh issue create --repo <owner>/<repo> --title "<title>" --body-file <file>`,
    so each `Depends on` line names issues that already exist.

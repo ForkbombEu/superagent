@@ -176,18 +176,19 @@ flowchart TD
   enforced by code: the worker could merge without a review. Branch protection
   is the enforced part (CI, no force pushes to the base branch).
 
-The target repository's `AGENTS.md` must not forbid agents from merging. If it
-does, replace that rule with:
+### Target repository setup
 
-```markdown
-## Merging
+Start each repository the deployment works on from
+[`templates/AGENTS.md`](templates/AGENTS.md): copy it to the repository root
+and fill in its **Project** section. It states the merge, commit and
+pull-request rules above, which the repository's own instructions must not
+contradict, and how to write issues so they run without a person (the
+`@forkboteu` mention, one PR per issue, `Depends on` lines, no holds). To fill
+a backlog, ask any coding agent to read that `AGENTS.md` and
+`docs/specification.md` and open the issues, with your `gh` account.
 
-Pull requests opened by the dsh-superagent agent account are merged by that
-agent automatically, without a human, once a Claude Code review of the exact
-head commit passes and all required CI checks pass, following the Delivery
-requirements of the dsh-superagent deployment. Agents never merge any other
-pull request, never use `--admin`, and never bypass branch protection.
-```
+One deployment works on one repository (`GITHUB_REPOSITORY`); use a separate
+Coolify application for each further repository.
 
 ## 5. Operational notes and limitations
 

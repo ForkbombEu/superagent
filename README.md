@@ -57,6 +57,7 @@ Configure Environment Variables:
 | `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
 | `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
 | `SUPERAGENT_EXECUTOR_REASONING_EFFORT` | Optional. Executor reasoning effort; empty uses the model default |
+| `SUPERAGENT_MAX_WORKERS` | Optional. Tickets worked on at the same time, 1–16 (panel default 3) |
 
 Provider and model ids are the ones the panel's model fields accept; the
 panel shows the DSH default as `provider / model`.
@@ -100,6 +101,7 @@ settings through the management API, so a new deployment starts configured:
 | Sources > GitHub > Agent GitHub CLI | `/usr/local/bin/gh-agent` |
 | Eval > On each Source > GitHub accounts that may originate work | `$SUPERAGENT_GITHUB_ALLOWED_USERS`, when set |
 | Execution > Executor model | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set |
+| Execution > Concurrent Tickets | `$SUPERAGENT_MAX_WORKERS`, when set |
 | Execution > Prepare command | `/usr/local/bin/prepare-worktree.sh` |
 | Prompts > Delivery requirements | [`prompts/delivery.md`](prompts/delivery.md): the Claude Code review and merge procedure below |
 
@@ -109,7 +111,7 @@ root stays empty, which already means `/home/agent/.dsh/state/superagent/work`.
 The script logs each save, or the reason a save was refused, with the
 prefix `superagent-configure:` in the `superagent` service log.
 
-Configure the rest in the panel: worker concurrency, prompts and a review
+Configure the rest in the panel: prompts and a review
 policy appropriate for your project. Default proactive accept mode `observe`
 still accepts explicit requests from allowlisted users; don't enable automatic
 inferred work prematurely.
@@ -146,6 +148,16 @@ flowchart TD
 - Each PR description names the issues it resolves with `Closes #<n>`, so
   GitHub closes them when the PR merges; an issue a PR only advances gets
   `Refs #<n>` and stays open.
+- **Issues run in dependency order without a person.** An issue lists its
+  prerequisites on one line of its description, `Depends on #<a>, #<b>`. Its
+  worker checks them first; if any is not closed as completed, it changes
+  nothing and reports blocked with `Waiting for dependencies: …`. After each
+  merge the worker reports ready, and on every ready report the main Session
+  retries each waiting ticket whose prerequisites are now all closed
+  (`orchestrator_ticket_retry`). Issues with no open prerequisites run in
+  parallel, up to `SUPERAGENT_MAX_WORKERS`. Each issue must mention
+  `@forkboteu` and be opened by an allowed account, so that it becomes a
+  Ticket; it must not ask to wait for a person.
 - At most three failing reviews per PR; then the worker reports blocked and
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.

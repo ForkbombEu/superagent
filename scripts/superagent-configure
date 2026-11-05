@@ -9,6 +9,7 @@ converges these fields, overwriting panel edits of the same fields:
 - Policy GitHub allowed list: $SUPERAGENT_GITHUB_ALLOWED_USERS, when set
 - Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
   optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
+- Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
 - Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, the Claude
   Code review and squash-merge procedure
 
@@ -62,18 +63,25 @@ def allowed_users():
     return users or None
 
 
-def executor_model():
+def executor_settings():
+    """Executor fields the environment sets: `model` and `maxWorkers`, each only when configured."""
     provider = os.environ.get('SUPERAGENT_EXECUTOR_PROVIDER', '').strip()
     model = os.environ.get('SUPERAGENT_EXECUTOR_MODEL', '').strip()
     effort = os.environ.get('SUPERAGENT_EXECUTOR_REASONING_EFFORT', '').strip()
-    if not (provider or model or effort):
-        return None
-    if not (provider and model):
-        sys.exit('superagent-configure: set both SUPERAGENT_EXECUTOR_PROVIDER and SUPERAGENT_EXECUTOR_MODEL')
-    return {'provider': provider, 'model': model, **({'reasoningEffort': effort} if effort else {})}
+    workers = os.environ.get('SUPERAGENT_MAX_WORKERS', '').strip()
+    settings = {}
+    if provider or model or effort:
+        if not (provider and model):
+            sys.exit('superagent-configure: set both SUPERAGENT_EXECUTOR_PROVIDER and SUPERAGENT_EXECUTOR_MODEL')
+        settings['model'] = {'provider': provider, 'model': model, **({'reasoningEffort': effort} if effort else {})}
+    if workers:
+        if not (workers.isdigit() and 1 <= int(workers) <= 16):
+            sys.exit('superagent-configure: SUPERAGENT_MAX_WORKERS must be a whole number from 1 to 16')
+        settings['maxWorkers'] = int(workers)
+    return settings
 
 
-def changes(view, prompts, users, model, delivery):
+def changes(view, prompts, users, executor_env, delivery):
     """Return (name, path, body) for each save whose value differs from the current one, in setup order."""
     github = next(source for source in view['sources'] if source['id'] == 'github')
     policy, executor = view['blocks']['policy'], view['blocks']['executor']
@@ -83,7 +91,7 @@ def changes(view, prompts, users, model, delivery):
         sources = policy['value']['sources']
         part = {**sources.get('github', {}), 'allowed': [{'id': login} for login in users]}
         wanted.append(('policy', policy, {**policy['value'], 'sources': {**sources, 'github': part}}))
-    wanted.append(('executor', executor, {**executor['value'], 'prepare': PREPARE, **({'model': model} if model else {})}))
+    wanted.append(('executor', executor, {**executor['value'], 'prepare': PREPARE, **executor_env}))
     pending = [(block, f'settings/{block}', {'value': value, 'revision': current['revision']})
                for block, current, value in wanted if current['value'] != value]
     current = prompts['current']
@@ -94,7 +102,7 @@ def changes(view, prompts, users, model, delivery):
 
 
 def main():
-    users, model = allowed_users(), executor_model()
+    users, executor_env = allowed_users(), executor_settings()
     with open(DELIVERY, encoding='utf-8') as file:
         delivery = file.read().strip()
     # Each block is saved at most once per run, so a value the API normalizes cannot loop.
@@ -108,7 +116,7 @@ def main():
             status, prompts = call('GET', 'prompts')
             if status != 200:
                 raise Unavailable(f'GET prompts: HTTP {status} {prompts.get("error", "")}')
-            pending = [change for change in changes(view, prompts, users, model, delivery)
+            pending = [change for change in changes(view, prompts, users, executor_env, delivery)
                        if change[0] not in saved | failed]
             if not pending:
                 if failed:

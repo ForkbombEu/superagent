@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Start the tickets whose dependencies are done, without a person.
+
+A worker whose issue lists `Depends on #a, #b` and finds one of them not closed
+as completed reports blocked with a summary whose first line is
+`Waiting for dependencies: #a #b` (prompts/delivery.md). superagent-entrypoint.sh
+runs this next to DSH; every minute it reads those tickets from the management
+API and retries each one whose listed issues are now all closed as completed, as
+the panel's Retry does. It reads issue states itself, so a dependency counts
+however it was closed, and no worker or main Session message is needed.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = 'http://127.0.0.1:3082/orchestrator/api/'
+HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
+INTERVAL_SECONDS = 60
+# A worker that blocks again right after a retry, its dependencies done, is
+# misreading them; stop retrying it then rather than every minute.
+MAX_RETRIES = 3
+WAITING = re.compile(r'Waiting for dependencies:\s*((?:#\d+[\s,]*)+)')
+
+
+def log(message):
+    print(f'superagent-dependencies: {message}', file=sys.stderr, flush=True)
+
+
+def call(method, path):
+    request = urllib.request.Request(API + path, data=b'{}' if method == 'POST' else None, method=method, headers=HEADERS)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+def issue_state(repository, number):
+    """'done' for an issue closed as completed, 'not planned' for one closed otherwise, else 'open'."""
+    result = subprocess.run(['gh-agent', 'issue', 'view', str(number), '--repo', repository, '--json', 'state,stateReason'],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'reading issue #{number}: {result.stderr.strip()}')
+    issue = json.loads(result.stdout)
+    if issue['state'] != 'CLOSED':
+        return 'open'
+    return 'done' if issue['stateReason'] == 'COMPLETED' else 'not planned'
+
+
+def sweep(repository, retries, reported):
+    for ticket in call('GET', 'tickets?state=person&limit=1000')['items']:
+        if ticket.get('action') != 'blocked' or not ticket['actions']['retry']:
+            continue
+        waiting = WAITING.match(ticket['summary'].strip().split('\n')[0])
+        if not waiting:
+            continue
+        numbers = [int(number) for number in re.findall(r'\d+', waiting.group(1))]
+        states = {number: issue_state(repository, number) for number in numbers}
+        if any(state == 'not planned' for state in states.values()):
+            if reported.get(ticket['id']) != ticket['updatedAt']:
+                reported[ticket['id']] = ticket['updatedAt']
+                closed = ', '.join(f'#{n}' for n, state in states.items() if state == 'not planned')
+                log(f'ticket {ticket["id"]} ({ticket["title"]}) cannot start: {closed} closed as not planned')
+            continue
+        if any(state != 'done' for state in states.values()):
+            continue
+        if retries.get(ticket['id'], 0) >= MAX_RETRIES:
+            if reported.get(ticket['id']) != ticket['updatedAt']:
+                reported[ticket['id']] = ticket['updatedAt']
+                log(f'ticket {ticket["id"]} ({ticket["title"]}) still reports waiting after {MAX_RETRIES} retries; leaving it')
+            continue
+        call('POST', f'tickets/{ticket["id"]}/retry')
+        retries[ticket['id']] = retries.get(ticket['id'], 0) + 1
+        log(f'retried ticket {ticket["id"]} ({ticket["title"]}): {", ".join(f"#{n}" for n in numbers)} done')
+
+
+def main():
+    repository = os.environ['GITHUB_REPOSITORY']
+    retries, reported, last_error = {}, {}, None
+    while True:
+        try:
+            sweep(repository, retries, reported)
+            last_error = None
+        except (urllib.error.URLError, OSError, ValueError, RuntimeError, KeyError) as error:
+            # Typically DSH (re)starting; report each distinct failure once.
+            if str(error) != last_error:
+                log(f'sweep failed, retrying in {INTERVAL_SECONDS} s: {error}')
+                last_error = str(error)
+        time.sleep(INTERVAL_SECONDS)
+
+
+if __name__ == '__main__':
+    main()

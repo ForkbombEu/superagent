@@ -169,11 +169,15 @@ The command:
 - **Issues run in dependency order without a person.** An issue lists its
   prerequisites on one line of its description, `Depends on #<a>, #<b>`. Its
   worker checks them first; if any is not closed as completed, it changes
-  nothing and reports blocked with `Waiting for dependencies: …`. After each
-  merge the worker reports ready, and on every ready report the main Session
-  retries each waiting ticket whose prerequisites are now all closed
-  (`orchestrator_ticket_retry`). Issues with no open prerequisites run in
-  parallel, up to `SUPERAGENT_MAX_WORKERS`. Each issue must mention
+  nothing and reports blocked with `Waiting for dependencies: …`.
+  [`superagent-dependencies`](scripts/superagent-dependencies), started by the
+  entrypoint, checks such tickets every minute and retries each one, as the
+  panel's **Retry** does, once all the issues it waits for are closed as
+  completed. It reads issue states from GitHub itself, so no worker or main
+  Session message is needed after a merge. It retries a ticket at most three
+  times, and logs (with the prefix `superagent-dependencies:`) a ticket that
+  waits for an issue closed as not planned. Issues with no open prerequisites
+  run in parallel, up to `SUPERAGENT_MAX_WORKERS`. Each issue must mention
   `@forkboteu` and be opened by an allowed account, so that it becomes a
   Ticket; it must not ask to wait for a person.
 - At most three failing reviews per PR; then the worker reports blocked and

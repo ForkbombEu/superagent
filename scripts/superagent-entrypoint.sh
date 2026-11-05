@@ -68,4 +68,6 @@ socat TCP-LISTEN:3083,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:3082 &
 # Apply the environment's Superagent settings once DSH answers. The subshell
 # orphans it to tini (compose `init: true`), which reaps it when it finishes.
 ( /usr/local/bin/superagent-configure & )
+# Retry tickets waiting for dependencies once those are done, every minute.
+( /usr/local/bin/superagent-dependencies & )
 exec "$@"

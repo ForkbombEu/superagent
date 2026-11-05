@@ -64,13 +64,13 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
-     scripts/superagent-configure scripts/claude-review /usr/local/bin/
+     scripts/superagent-configure scripts/superagent-dependencies scripts/claude-review /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
+    /usr/local/bin/superagent-dependencies \
     /usr/local/bin/claude-review
-# Claude Code PR review: the reviewer's permission policy (managed settings take precedence over
 # user and repository settings) and the review prompt claude-review sends, and the
 # Delivery requirements that superagent-configure saves.
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json

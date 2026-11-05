@@ -132,9 +132,17 @@ flowchart TD
   E --> F{head still sha, required checks passed, no changes requested?}
   F -->|checks pending| F
   F -->|check failed or head changed| C
-  F -->|yes| G["gh pr merge --squash --match-head-commit sha"]
+  F -->|yes| G["gh pr merge --squash --match-head-commit sha --subject 'title (#n)'"]
 ```
 
+- Every review that ends with a verdict is posted on the PR, verbatim, as a
+  `**Claude Code review** of <sha>` comment by the agent account, so the PR
+  keeps the record of each round.
+- Commit messages and PR titles follow
+  [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+  Claude Code blocks a PR whose title does not, and only notes a
+  non-conforming commit message: the squash commit on the base branch takes
+  its subject from the reviewed title.
 - At most three failing reviews per PR; then the worker reports blocked and
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.

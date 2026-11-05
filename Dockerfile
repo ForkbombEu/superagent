@@ -23,13 +23,32 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Match the version in upstream docs/006-deployment.md. Claude Code is the PR
-# reviewer that scripts/claude-review runs; Bun runs the target repository's
-# tests for the workers and the reviewer.
+# reviewer that scripts/claude-review runs.
 # BuildKit cache mounts keep downloaded packages on the build host between
 # deployments (even when layers are rebuilt) and out of the image/volume.
 RUN --mount=type=cache,target=/var/cache/npm \
     npm install --global --prefer-offline --cache /var/cache/npm \
-      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318 bun@1.3.1
+      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
+
+# mise installs each target repository's toolchain from its mise.toml (see
+# prepare-worktree.sh and claude-review); the release is checked against its
+# published SHA-256 sums.
+ARG MISE_VERSION=v2026.11.2
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) exit 1 ;; esac; \
+    asset="mise-$MISE_VERSION-linux-$arch"; \
+    cd /tmp; \
+    curl -fsSLO "https://github.com/jdx/mise/releases/download/$MISE_VERSION/$asset"; \
+    curl -fsSL "https://github.com/jdx/mise/releases/download/$MISE_VERSION/SHASUMS256.txt" \
+      | grep " \./$asset\$\| $asset\$" | sed "s| \./| |" | sha256sum -c -; \
+    install -m 0755 "$asset" /usr/local/bin/mise; \
+    rm "$asset"
+# Shims first, so a repository's pinned versions win in its directories;
+# elsewhere `node` falls back to the image's own, which runs dsh. Tool versions
+# apply in any directory; only the ticket directories, the repository checkout
+# and claude-review's checkouts are trusted to run config code ([env], tasks, hooks).
+ENV PATH=/home/agent/.local/share/mise/shims:$PATH \
+    MISE_TRUSTED_CONFIG_PATHS=/home/agent/.dsh/state/superagent/work:/home/agent/src:/tmp/claude-review
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
     install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent

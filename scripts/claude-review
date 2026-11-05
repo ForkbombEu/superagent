@@ -25,6 +25,7 @@ PROMPT = '/usr/local/share/superagent/review-prompt.md'
 # Written by superagent-entrypoint.sh: the Claude credential, model and effort,
 # which DSH strips from worker shells as it does every *_TOKEN/*_KEY variable.
 CONFIG = '/run/superagent-secrets/claude-review.json'
+CHECKOUTS = '/tmp/claude-review'
 DISCLOSURE = 'This is by an automated agent, not a human.'
 TIMEOUT_SECONDS = 1800
 # GitHub rejects comments over 65536 characters.
@@ -65,9 +66,16 @@ def main():
     inherited = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
     # A detached checkout of <sha> of its own: installing dependencies and running
     # tests leave the worker's directory alone, and the checkout is deleted after.
-    checkout = tempfile.mkdtemp(prefix='claude-review-')
+    # mise trusts this root (MISE_TRUSTED_CONFIG_PATHS in the Dockerfile).
+    os.makedirs(CHECKOUTS, exist_ok=True)
+    checkout = tempfile.mkdtemp(dir=CHECKOUTS)
     run('git', 'worktree', 'add', '--detach', checkout, sha)
     try:
+        # The toolchain the PR pins in mise.toml; a failure is Claude Code's to report.
+        try:
+            subprocess.run(['mise', '--cd', checkout, 'install'], capture_output=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            pass
         result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
                                 cwd=checkout, env={**inherited, **config['env']})
     except subprocess.TimeoutExpired:

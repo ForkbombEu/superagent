@@ -33,6 +33,9 @@ dependencies, standards to follow, what must never be done. One bullet each. -->
 ## Code and tests
 
 - Every change comes with tests that exercise it, and the existing tests pass.
+- The toolchain (runtimes, package managers, CLIs) is pinned in `mise.toml` at
+  the repository root, and CI uses the same versions. Change a version there,
+  in the same pull request as anything that needs it.
 - Keep changes within the scope of their issue; record anything else found on
   the way as a new issue instead of fixing it in the same pull request.
 - Never commit secrets, credentials or personal data, and never deploy to

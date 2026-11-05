@@ -184,7 +184,7 @@ The command:
   [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
   installed as `/etc/claude-code/managed-settings.json`. It may read files, run
   read-only `git` and inspection commands, install dependencies and run tests,
-  type checks and builds (`npm`, `npx`, `node`, `pnpm`, `bun`, `make`,
+  type checks and builds (`npm`, `npx`, `node`, `pnpm`, `bun`, `mise`, `make`,
   `pytest`), and read the PR, issues and CI runs with read-only `gh`
   subcommands. File edits, `git commit`/`push`, `gh api` and every `gh`
   subcommand that writes are denied, and the repository's own `.claude/`
@@ -196,6 +196,15 @@ The command:
   merge rights. Enable squash merging in the repository, and require status
   checks in branch protection for the CI gate to mean anything; do not require
   approving reviews, which the agent account cannot give itself.
+- **Toolchains come from the repository's `mise.toml`.** The image ships
+  [mise](https://mise.jdx.dev/) instead of fixed runtimes. The prepare command
+  runs `mise install` in every new Ticket directory and `claude-review` in every
+  review checkout, so the worker and Claude Code use the versions the
+  repository pins (for example Bun and Node); mise's shims come first on
+  `PATH`. Outside such a repository, `node` is the image's own. Installed
+  versions stay in the `superagent_home` volume. Tool versions apply in any
+  directory; mise runs a `mise.toml`'s `[env]`, tasks and hooks only in the
+  Ticket directories, the repository checkout and the review checkouts.
 - These are prompt instructions to the DeepSeek worker, not a guarantee
   enforced by code: the worker could merge without a review. Branch protection
   is the enforced part (CI, no force pushes to the base branch).

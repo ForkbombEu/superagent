@@ -23,3 +23,6 @@ git -C "$checkout" worktree add \
   -b "agent/$DSH_SUPERAGENT_NAME" \
   "$DSH_SUPERAGENT_DIR" \
   "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
+# Install the toolchain the repository pins in mise.toml (or .tool-versions);
+# nothing happens when it pins none.
+mise --cd "$DSH_SUPERAGENT_DIR" install

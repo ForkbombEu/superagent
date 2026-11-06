@@ -148,10 +148,21 @@ The command:
   image) with the fixed review task in
   [`claude-code/review-prompt.md`](claude-code/review-prompt.md), so DeepSeek
   cannot change what Claude is asked or conclude for it;
+- gives Claude this PR's earlier reviews: every summary, and the latest review
+  in full with its fix plan. Claude first re-checks the earlier blocking
+  findings. A later round may only block on an unresolved finding, a problem
+  the new changes introduced, a failing check, or a security, data-loss or
+  correctness defect that can actually be triggered, and a recurring kind of
+  problem gets one structural fix instead of another patch;
 - accepts only an answer ending in `VERDICT: PASS|FAIL` and
-  `REVIEWED_SHA: <that sha>`, posts it verbatim on the PR as a
-  `**Claude Code review** of <sha>` comment, the record of each round, and
-  exits 0 for PASS, 1 for FAIL, 2 when there is no usable review (nothing
+  `REVIEWED_SHA: <that sha>`, with a Summary, a Review and a Fix plan written
+  for DeepSeek (files, code sketches, tests with expected results, commands to
+  run). It posts only the Summary on the PR, as a
+  `**Claude Code review** of <sha>: PASS|FAIL` comment, the record of each
+  round, and keeps the whole answer in the volume under
+  `~/.local/state/claude-review/<owner>/<repo>/pr-<n>/`, as the worker's input
+  and the next review's history;
+- exits 0 for PASS, 1 for FAIL, 2 when there is no usable review (nothing
   posted, for example a timeout after 30 minutes) and 3 when the comment could
   not be posted;
 - reads the Claude credential, `SUPERAGENT_REVIEWER_MODEL` and

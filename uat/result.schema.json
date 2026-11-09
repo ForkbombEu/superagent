@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ForkbombEu/superagent/uat/result.schema.json",
+  "title": "Superagent UAT tester result",
+  "description": "The JSON object the DeepSeek tester returns as its final answer. The controller derives repository, issue, PR, head SHA, spec hash and environment itself and rejects a result that does not repeat them exactly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "issue_number", "pr_number", "head_sha", "uat_spec_sha256",
+               "environment", "environment_revision", "verdict", "scenarios"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "pr_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"$ref": "#/$defs/sha1"},
+    "uat_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "environment": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "environment_revision": {"$ref": "#/$defs/sha1"},
+    "verdict": {"$ref": "#/$defs/verdict"},
+    "summary": {"type": "string", "maxLength": 2000},
+    "scenarios": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/scenario"}}
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "verdict": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "verdict", "expected", "observed", "evidence"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^UAT-[1-9][0-9]{0,3}$"},
+        "verdict": {"$ref": "#/$defs/verdict"},
+        "expected": {"$ref": "#/$defs/text"},
+        "observed": {"$ref": "#/$defs/text"},
+        "reproduction": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/text"}},
+        "evidence": {
+          "type": "array",
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": {"type": "string", "maxLength": 200,
+                    "pattern": "^artifacts/[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$"}
+        }
+      }
+    }
+  }
+}

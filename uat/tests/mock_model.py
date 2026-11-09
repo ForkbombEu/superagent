@@ -15,10 +15,12 @@ are the real ones:
 
 A step may instead be {"status": 500} (an HTTP error) or carry "sleep": seconds
 before answering. Steps past the end repeat the last one. The script is read
-again for every request, so a test can rewrite it between runs.
+again for every request, so a test can rewrite it between runs, and may hold
+{"by_pr": {"<n>": [steps]}} to answer each "pull request #<n>" prompt alike.
 """
 import json
 import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,7 +45,12 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(self.log_dir, f'{Handler.counter:03d}.json'), 'w') as file:
                 json.dump({'path': self.path, 'request': request}, file)
         with open(self.script_path) as file:
-            steps = json.load(file)['steps']
+            script = json.load(file)
+        if 'by_pr' in script:
+            pr = re.search(r'pull request #(\d+)', json.dumps(request['messages'][0])).group(1)
+            steps = script['by_pr'][pr]
+        else:
+            steps = script['steps']
         index = min(sum(message['role'] == 'assistant' for message in request['messages']), len(steps) - 1)
         step = steps[index]
         time.sleep(step.get('sleep', 0))

@@ -19,7 +19,8 @@ from uat import result as results
 PROMPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'prompts', 'uat-tester.md')
 ENVIRONMENTS = {
     'local': 'the pull request\'s code was built and started in a disposable sandbox that shares its network '
-             'with you; it has no other network access.',
+             'with you and has no other network access; its console output is in /app-logs/app.log (read-only: '
+             'copy it into /work/artifacts when it is evidence).',
     'preview': 'the pull request\'s preview deployment, verified to run this commit; use only test data.',
 }
 # Variables the tester container receives from the controller's environment, by name.
@@ -55,7 +56,7 @@ def render_prompt(meta, spec, base_url, template_path=PROMPT):
         return re.sub('|'.join(map(re.escape, values)), lambda match: values[match.group(0)], file.read())
 
 
-def tester_command(name, image, network, work_dir, repo_dir, proxy, environment):
+def tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts=()):
     """`docker run` arguments for one tester attempt (the prompt goes on stdin)."""
     passed = [item for key in PASSED_ENVIRONMENT if environment.get(key) for item in ('-e', key)]
     return [
@@ -63,7 +64,7 @@ def tester_command(name, image, network, work_dir, repo_dir, proxy, environment)
         '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         # DSH loads native bindings it unpacks in /tmp: exec is required.
         '--pids-limit', '1024', '--memory', '4g', '--cpus', '2', '--tmpfs', '/tmp:rw,exec,size=1g',
-        '-v', f'{work_dir}:/work', *(['-v', f'{repo_dir}:/repo:ro'] if repo_dir else []),
+        '-v', f'{work_dir}:/work', *(['-v', f'{repo_dir}:/repo:ro'] if repo_dir else []), *extra_mounts,
         '-e', f'HTTPS_PROXY=http://{proxy}', '-e', f'HTTP_PROXY=http://{proxy}', '-e', 'NODE_USE_ENV_PROXY=1',
         '-e', 'NO_PROXY=127.0.0.1,localhost', '-e', 'DSH_TELEMETRY_MODE=DISABLED', *passed,
         image, 'dsh', '--profile', 'superagent-uat', '--json', '-',
@@ -91,7 +92,7 @@ def attempt(command, name, prompt, timeout, out_dir, environment):
 
 
 def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo_dir=None, timeout=1800,
-        environment=None, name_prefix='superagent-uat'):
+        environment=None, name_prefix='superagent-uat', extra_mounts=()):
     """Test the spec, retrying a transient failure once; (Outcome, path of the work dir that produced it)."""
     environment = dict(os.environ if environment is None else environment)
     prompt = render_prompt(meta, spec, base_url)
@@ -105,7 +106,7 @@ def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo
         with open(os.path.join(attempt_out, 'prompt.md'), 'w', encoding='utf-8') as file:
             file.write(prompt)
         name = f'{name_prefix}-tester-{number}'
-        command = tester_command(name, image, network, work_dir, repo_dir, proxy, environment)
+        command = tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts)
         raw, exit_code, timed_out, started, finished = attempt(command, name, prompt, timeout, attempt_out, environment)
         outcome = results.evaluate(raw, exit_code, timed_out, meta, ids, work_dir)
         records.append({'attempt': number, 'started_at': started, 'finished_at': finished, 'exit_code': exit_code,

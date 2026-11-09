@@ -1,0 +1,9 @@
+version: 1
+default_environment: local
+environments:
+  local:
+    type: local
+    setup: python3 -c "print('setup ok')" > setup.marker
+    start: python3 server.py 3000
+    ready: http://127.0.0.1:3000/health
+    cleanup: echo cleaned > /uat-logs/cleanup.marker

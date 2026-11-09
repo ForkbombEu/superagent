@@ -50,14 +50,47 @@ OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}'}
 REDIRECTS = {'>', '>>', '>|', '&>', '&>>', '<', '>&', '<&'}
 # curl --write-out may add only curl's own variables and separators, never a forged status line.
 WRITE_OUT = re.compile(r'(%\{[a-z_]+\}|[A-Za-z _=:,-]|\\[nt])*')
+# curl options that take a value: the next word, the rest of a short option cluster (`-ofile`), or `=value`.
+# Any other word that is not an option is a URL curl requests, like the value of --url.
+CURL_VALUE_SHORT = set('AbcCdDeEFHmoPQrtTuUwXyYz')
+CURL_VALUE_LONG = {
+    '--data', '--data-ascii', '--data-binary', '--data-raw', '--data-urlencode', '--json', '--form', '--form-string',
+    '--header', '--proxy-header', '--request', '--request-target', '--output', '--output-dir', '--write-out', '--user',
+    '--user-agent', '--referer', '--cookie', '--cookie-jar', '--upload-file', '--max-time', '--connect-timeout',
+    '--retry', '--retry-delay', '--retry-max-time', '--range', '--dump-header', '--cacert', '--capath', '--cert',
+    '--cert-type', '--key', '--key-type', '--pass', '--url', '--url-query', '--limit-rate', '--max-filesize',
+    '--max-redirs', '--oauth2-bearer', '--continue-at', '--speed-limit', '--speed-time', '--time-cond', '--trace',
+    '--trace-ascii', '--stderr', '--variable', '--expect100-timeout', '--keepalive-time', '--aws-sigv4', '--ciphers',
+    '--interface', '--local-port', '--netrc-file', '--proto', '--proto-redir'}
+# Options that make curl connect elsewhere than the URL names, or read options from a file: refused.
+CURL_REROUTE = {'-x', '-K', '--proxy', '--preproxy', '--connect-to', '--resolve', '--unix-socket',
+                '--abstract-unix-socket', '--socks4', '--socks4a', '--socks5', '--socks5-hostname', '--doh-url',
+                '--proto-default', '--config'}
 HTTP_STATUS_LINE = re.compile(rb'^HTTP/[0-9.]+ ([1-5][0-9]{2})\b', re.MULTILINE)
-# A status code `observed` reports: after HTTP/status/code (a list too: "HTTP 201, then 200") or before a
-# reason phrase ("404 Not Found"); "500 records" is a quantity.
-CLAIM = re.compile(r'\b(?:HTTP(?:/[0-9.]+)?|status(?:\s+code)?|code)\s*:?\s*([1-5][0-9]{2}(?:(?:\s*(?:,|/|\band\b|\bthen\b|'
-                   r'\bor\b))+\s*[1-5][0-9]{2}\b)*)|\b([1-5][0-9]{2})\s+(?:OK|Created|Accepted|No Content|Moved|Found|See Other|'
-                   r'Not Modified|Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|'
-                   r'Unprocessable|Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable|'
-                   r'Gateway Timeout)\b', re.IGNORECASE)
+# Reading the HTTP statuses `observed` reports (reported_statuses). A three-digit number not part of a
+# longer token (200ms, 12:30:45, 2026-11-09, #201, v1.201) is a status after one of STATUS_WORDS or
+# ANSWER_VERBS ("POST returned 201"), before a reason phrase ("404 Not Found"), continuing a list of
+# statuses ("HTTP 201, then 200") or, when the scenario's evidence holds HTTP responses, alone ("201, 200").
+# It is a quantity, an id or a contrast after one of NOT_STATUS ("id 201", "port 300", "shows 500",
+# "expected 201") or before any word but those of KEEPS_STATUS ("500 records", "200 ms").
+NUMBER = re.compile(r'(?<![\w#.:/-])[1-5][0-9]{2}(?![\w:/-]|\.[0-9])')
+STATUS_WORDS = {'http', 'status', 'statuses', 'code', 'codes'}
+ANSWER_VERBS = {'returned', 'returns', 'return', 'returning', 'responded', 'responds', 'respond', 'answered', 'answers',
+                'answer', 'got', 'gets', 'get', 'received', 'receives', 'gave', 'gives', 'replied', 'replies',
+                'yielded', 'yields', 'with'}
+NOT_STATUS = {'id', 'ids', 'no', 'number', 'numbers', 'record', 'records', 'item', 'items', 'row', 'rows', 'page',
+              'pages', 'port', 'version', 'line', 'lines', 'user', 'users', 'of', 'total', 'count', 'size', 'length',
+              'limit', 'offset', 'top', 'first', 'last', 'expected', 'expecting', 'expect', 'expects', 'not', 'than',
+              'should', 'be', 'instead', 'shows', 'show', 'showed', 'lists', 'list', 'listed', 'contains', 'contain',
+              'has', 'have', 'had', 'displays', 'display', 'displayed', 'took', 'takes', 'lasted', 'within', 'over',
+              'under', 'about', 'around', 'approximately', 'after', 'in', 'at', 'every', 'each'}
+KEEPS_STATUS = {'for', 'on', 'in', 'with', 'when', 'after', 'because', 'as', 'to', 'from', 'and', 'then', 'but',
+                'while', 'at', 'so', 'since', 'instead', 'again', 'both', 'each', 'via', 'by', 'once', 'twice', 'if',
+                'or', 'not', 'response', 'responses', 'error', 'errors', 'status', 'code', 'reply', 'answer'}
+ARTICLES = {'a', 'an', 'the'}
+REASON = re.compile(r'(?:OK|Created|Accepted|No Content|Moved|Found|See Other|Not Modified|Bad Request|Unauthorized|'
+                    r'Forbidden|Not Found|Method Not Allowed|Conflict|Gone|Unprocessable|Too Many Requests|'
+                    r'Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b', re.IGNORECASE)
 METADATA = ('repository', 'issue_number', 'pr_number', 'head_sha', 'uat_spec_sha256', 'environment',
             'environment_revision')
 
@@ -226,25 +259,70 @@ def application_hosts(origins):
     return hosts
 
 
+def request_urls(name, arguments):
+    """The URLs a curl or chromium command requests, or None when it may also reach something else
+    (a rerouting or option-file curl option, a forged write-out). Values of options (headers, bodies,
+    referers) are not requests, whatever they contain."""
+    urls, index = [], 0
+    while index < len(arguments):
+        word = arguments[index]
+        index += 1
+        if name == 'chromium':  # Its flags are all --flag[=value]; every other word is a page it opens.
+            if not word.startswith('-'):
+                urls.append(word)
+            continue
+        if not word.startswith('-') or word == '-':
+            urls.append(word)
+            continue
+        if word == '--':
+            urls += arguments[index:]
+            break
+        if word.startswith('--'):
+            option, has_value, value = word.partition('=')
+            if option in CURL_REROUTE:
+                return None
+            if option in CURL_VALUE_LONG and not has_value:
+                value, index = (arguments[index], index + 1) if index < len(arguments) else ('', index)
+        else:
+            option = value = None
+            for position, letter in enumerate(word[1:], 2):
+                if f'-{letter}' in CURL_REROUTE:
+                    return None
+                if letter in CURL_VALUE_SHORT:
+                    option, value = f'-{letter}', word[position:]
+                    if not value:
+                        value, index = (arguments[index], index + 1) if index < len(arguments) else ('', index)
+                    break
+        if option == '--url':
+            urls.append(value)
+        elif option in ('-w', '--write-out') and not WRITE_OUT.fullmatch(value):
+            return None
+    return urls
+
+
+def addresses_application(url, hosts):
+    """Whether a requested URL is http(s) on the application. Like curl, a URL without a scheme is http;
+    `data:`, `file:`, `about:` ... are other schemes, refused."""
+    if '://' not in url:
+        if re.match(r'[A-Za-z][A-Za-z0-9+.-]*:(?![0-9])', url):
+            return False
+        url = 'http://' + url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port or (443 if parts.scheme == 'https' else 80)
+    except ValueError:  # An invalid or globbed port.
+        return False
+    return parts.scheme in ('http', 'https') and f'{parts.hostname}:{port}' in hosts
+
+
 def from_application(segment, hosts):
-    """Whether a simple command outputs only what the application answered: a client addressing the
-    application and nothing else (no file:, data: or other host, no option file, no forged write-out), or
-    a reader of the application's log and nothing else."""
+    """Whether a simple command outputs only what the application answered: a client requesting the
+    application's URLs and nothing else (no file:, data: or other host, no rerouting, no option file, no
+    forged write-out), or a reader of the application's log and nothing else."""
     name, arguments = program(segment[0])
     if name in CLIENTS:
-        for word, following in zip(arguments, [*arguments[1:], '']):
-            if word in ('-K', '--config') or word.startswith('--config='):
-                return False
-            if word in ('-w', '--write-out') and not WRITE_OUT.fullmatch(following):
-                return False
-        urls = [value for value in (word.split('=', 1)[-1] for word in arguments)
-                if '://' in value or re.match(r'(file|data|javascript|blob|about):', value)]
-        for url in urls:
-            parts = urllib.parse.urlsplit(url)
-            if parts.scheme not in ('http', 'https') or (
-                    f'{parts.hostname}:{parts.port or (443 if parts.scheme == "https" else 80)}' not in hosts):
-                return False
-        return bool(urls)
+        urls = request_urls(name, arguments)
+        return bool(urls) and all(addresses_application(url, hosts) for url in urls)
     if name in LOG_READERS:
         sources = [word for word in (arguments[:-1] if name == 'cp' else arguments) if not word.startswith('-')]
         return bool(sources) and all(word.startswith(APP_LOGS) or word.isdigit() for word in sources) and any(
@@ -271,6 +349,28 @@ def captures(simple, index, hosts):
     if program(simple[index][0])[0] == 'tee':
         return index > 0 and simple[index - 1][2] and from_application(simple[index - 1], hosts)
     return from_application(simple[index], hosts)
+
+
+def reported_statuses(text, http):
+    """The HTTP status codes a scenario's `observed` text reports (see NUMBER); bare numbers count only
+    when `http`, the scenario's evidence holding HTTP responses."""
+    reported, previous_end, previous_reported = set(), None, False
+    for match in NUMBER.finditer(text):
+        words = re.findall(r'[A-Za-z]+', text[:match.start()])[-2:]
+        before = (words[0] if len(words) == 2 and words[1].lower() in ARTICLES else (words or [''])[-1]).lower()
+        after = re.match(r'\s*([A-Za-z]+)?', text[match.end():]).group(1) or ''
+        continues = previous_reported and re.fullmatch(r'(?:\s*(?:,|/|\band\b|\bthen\b|\bor\b))+\s*',
+                                                       text[previous_end:match.start()], re.IGNORECASE)
+        if continues or before in STATUS_WORDS or REASON.match(text[match.end():].lstrip()):
+            status = True
+        elif before in NOT_STATUS or (after and after.lower() not in KEEPS_STATUS):
+            status = False
+        else:
+            status = before in ANSWER_VERBS or http
+        if status:
+            reported.add(int(match.group()))
+        previous_end, previous_reported = match.end(), status
+    return reported
 
 
 def provenance_problems(scenario, commands, hosts, work_dir):
@@ -307,8 +407,7 @@ def provenance_problems(scenario, commands, hosts, work_dir):
         statuses |= {int(code) for code in HTTP_STATUS_LINE.findall(content)}
         if code_only and re.fullmatch(rb'\s*[1-5][0-9]{2}\s*', content):
             statuses.add(int(content))
-    claimed = {int(code) for match in CLAIM.finditer(scenario['observed'])
-               for code in re.findall(r'[1-5][0-9]{2}', match.group(1) or match.group(2))}
+    claimed = reported_statuses(scenario['observed'], http=bool(statuses))
     if claimed - statuses:
         problems.append(f'observed reports HTTP {", ".join(map(str, sorted(claimed - statuses)))}, but its evidence '
                         'holds ' + (f'only the responses {", ".join(map(str, sorted(statuses)))}' if statuses else

@@ -245,6 +245,92 @@ class EvaluateTest(unittest.TestCase):
                  *CAPTURE[1:])
         self.assertEqual(self.evaluate(trace(PASSING, calls=calls)).verdict, 'PASS')
 
+    def capture(self, command, observed=None):
+        """Evaluate PASSING with UAT-1's evidence captured by `command` (and `observed` reported for it)."""
+        result = copy.deepcopy(PASSING)
+        if observed is not None:
+            result['scenarios'][0]['observed'] = observed
+        return self.evaluate(trace(result, calls=(('bash', command, 'completed'), *CAPTURE[1:])))
+
+    def test_request_urls_are_told_from_option_values(self):
+        target = '> artifacts/uat-1-http.json'
+        for command in (f"curl -sS -i '{ORIGIN}/search?q=hello&page=2' {target}",
+                        "curl -sS -i -X POST -H 'content-type: application/json' "
+                        f"""-d '{{"redirect_uri":"https://client.example/callback"}}' {ORIGIN}/authorize {target}""",
+                        f"curl -sS -i -H 'Referer: https://client.example/' -e https://client.example/ {ORIGIN}/ {target}",
+                        f'curl -sS -i --url={ORIGIN}/records {target}',
+                        f'curl -sS -i --url "{ORIGIN}/records?next=https://client.example/" {target}',
+                        f"curl -sS -i -G --data-urlencode 'next=https://client.example/' {ORIGIN}/records {target}",
+                        f'curl -sSi -o artifacts/uat-1-http.json {ORIGIN}/records',
+                        f'curl -sSiofoo.txt {ORIGIN}/records {target}',
+                        f'curl -sS -i 127.0.0.1:3000/records {target}'):
+            with self.subTest(command):
+                self.assertEqual(self.capture(command).verdict, 'PASS', self.capture(command).reasons)
+
+    def test_requests_elsewhere_are_refused(self):
+        target = '> artifacts/uat-1-http.json'
+        for command in (f'curl -sS -i --url=https://example.com/ {target}',
+                        f'curl -sS -i --url https://example.com/ {ORIGIN}/ {target}',
+                        f'curl -sS -i {ORIGIN}/ example.com/fake {target}',
+                        f'curl -sS -i {ORIGIN}/ file:///work/fake.txt {target}',
+                        f"curl -sS -i {ORIGIN}/ 'data:text/plain,HTTP/1.1 201' {target}",
+                        f'curl -sS -i -x http://example.com:8080 {ORIGIN}/ {target}',
+                        f'curl -sS -i --proxy=http://example.com:8080 {ORIGIN}/ {target}',
+                        f'curl -sS -i --resolve 127.0.0.1:3000:203.0.113.1 {ORIGIN}/ {target}',
+                        f'curl -sS -i --connect-to 127.0.0.1:3000:example.com:80 {ORIGIN}/ {target}',
+                        f'curl -sSiK /work/options {ORIGIN}/ {target}',
+                        f"curl -sS -w 'HTTP/1.1 201 Created' -o /dev/null {ORIGIN}/ {target}",
+                        f"curl -sS --write-out='HTTP/1.1 201' -o /dev/null {ORIGIN}/ {target}",
+                        f"curl -sS -i 'http://{{127.0.0.1:3000,example.com}}/' {target}",
+                        f'curl -sS -i {target}'):
+            with self.subTest(command):
+                self.assertBlocked(self.capture(command), 'UAT-1: artifacts/uat-1-http.json is written by a command')
+
+    def test_reported_statuses_are_checked_against_every_cited_response(self):
+        both = 'HTTP/1.1 201 Created\r\n\r\n{"id": 1}\nHTTP/1.1 200 OK\r\n\r\n{"id": 1}'
+        for observed in ('HTTP 201, then 200', 'POST returned 201; GET returned 200', '201, 200',
+                         'created (201 Created), then the GET answered 200 OK'):
+            with self.subTest(observed):
+                self.write('uat-1-http.json', both)  # Two requests, two responses in one capture.
+                self.assertEqual(self.capture(CAPTURE[0][1], observed).verdict, 'PASS')
+                self.write('uat-1-http.json', 'HTTP/1.1 201 Created\r\n\r\n{"id": 1}')
+                self.assertBlocked(self.capture(CAPTURE[0][1], observed),
+                                   'UAT-1: observed reports HTTP 200, but its evidence holds only the responses 201')
+                self.write('uat-1-http.json', 'HTTP/1.1 500 Internal Server Error\r\n\r\n{}')
+                self.assertBlocked(self.capture(CAPTURE[0][1], observed), 'observed reports HTTP 200, 201, but its '
+                                                                          'evidence holds only the responses 500')
+
+    def test_statuses_across_several_evidence_files(self):
+        self.write('uat-1-get.json', 'HTTP/1.1 200 OK\r\n\r\n{"id": 1}')
+        result = copy.deepcopy(PASSING)
+        result['scenarios'][0].update(observed='POST returned 201; GET returned 200',
+                                      evidence=['artifacts/uat-1-http.json', 'artifacts/uat-1-get.json'])
+        calls = (*CAPTURE, ('bash', f'curl -sS -i {ORIGIN}/records/1 -o artifacts/uat-1-get.json', 'completed'))
+        self.assertEqual(self.evaluate(trace(result, calls=calls)).verdict, 'PASS')
+        result['scenarios'][0]['observed'] = 'POST returned 201; GET returned 404'
+        self.assertBlocked(self.evaluate(trace(result, calls=calls)), 'observed reports HTTP 404')
+
+    def test_quantities_ids_ports_durations_and_times_are_not_statuses(self):
+        for observed in ('HTTP 201 for 500 records on port 3000 in 200ms', 'HTTP 201; took 200 ms; record id 404',
+                         'HTTP 201 at 12:30:45 on 2026-11-09, release v1.500, ticket #404',
+                         'HTTP 201 instead of the expected 500', 'HTTP 201: the list shows 300 items, total 500.',
+                         'HTTP 201 and the response returned 500 records'):
+            with self.subTest(observed):
+                self.assertEqual(self.capture(CAPTURE[0][1], observed).verdict, 'PASS')
+
+    def test_browser_and_log_scenarios_need_no_status(self):
+        self.write('uat-1.png', '\x89PNG fake image bytes')
+        browser = copy.deepcopy(PASSING)
+        browser['scenarios'][0].update(observed='the page lists 120 records, then 300.', evidence=['artifacts/uat-1.png'])
+        calls = (('bash', f'chromium --headless --screenshot=artifacts/uat-1.png {ORIGIN}/records', 'completed'),
+                 *CAPTURE[1:])
+        self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
+        logs = copy.deepcopy(PASSING)
+        logs['scenarios'][0].update(observed='the log records the new entry 201, 200', evidence=['artifacts/server.log'])
+        self.assertEqual(self.evaluate(trace(logs)).verdict, 'PASS')
+        browser['scenarios'][0]['observed'] = 'the page answered 404 Not Found'
+        self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'holds no HTTP status line')
+
     def test_overall_verdict_must_match_scenarios(self):
         lying = copy.deepcopy(RESULT)
         lying['verdict'] = 'PASS'

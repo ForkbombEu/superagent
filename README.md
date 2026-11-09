@@ -358,8 +358,13 @@ the tester's executed commands produced in a fresh directory
 `curl` or `chromium` command that addresses only the application (to the file
 itself or through a `tee`), or copied from its log under `/app-logs/`, and by
 no other command (no `echo`, `sed` or script, comments ignored as the shell
-ignores them); and every HTTP status the scenario reports (`HTTP 201`,
-`404 Not Found`; not quantities such as `500 records`) in the status lines of
+ignores them). A request's URLs are curl's own (its positional words and
+`--url`), never values of other options such as headers or bodies; options
+that reroute it (`-x`, `--resolve`, `--connect-to`, `-K` ...) are refused.
+Every HTTP status the scenario reports (`HTTP 201, then 200`, `POST returned
+201`, `404 Not Found`, or a bare `201, 200` when its evidence holds HTTP
+responses; not quantities, ids, ports or durations such as `500 records`,
+`id 404`, `port 3000`, `200 ms`) must be in the status lines of
 its own cited responses. Anything else (timeout, crash, malformed answer,
 missing, fabricated or unrelated evidence, a PASS without executed commands)
 is `BLOCKED`.

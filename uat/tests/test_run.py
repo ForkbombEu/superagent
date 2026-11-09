@@ -29,10 +29,10 @@ class PromptTest(unittest.TestCase):
 
     def test_tester_gets_only_named_variables(self):
         command = run.tester_command('n', 'img', 'container:app', '/w', '/r', 'proxy:3128',
-                                     {'DEEPSEEK_API_KEY': 'k', 'GH_TOKEN': 'g', 'SUPERAGENT_UAT_APP_PRIVATE_KEY': 'p'})
+                                     {'DEEPSEEK_API_KEY': 'k', 'GH_TOKEN': 'g', 'SUPERAGENT_UAT_GITHUB_TOKEN': 'p'})
         self.assertIn('DEEPSEEK_API_KEY', command)
         self.assertNotIn('k', command)
-        self.assertFalse([item for item in command if 'GH_TOKEN' in item or 'PRIVATE_KEY' in item])
+        self.assertFalse([item for item in command if 'GH_TOKEN' in item or 'GITHUB_TOKEN' in item])
         self.assertIn('/r:/repo:ro', command)
 
 

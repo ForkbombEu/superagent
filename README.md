@@ -55,7 +55,7 @@ Configure Environment Variables:
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token` |
 | `SUPERAGENT_REVIEWER_MODEL` | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses Claude Code's default for the account |
 | `SUPERAGENT_REVIEWER_EFFORT` | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`) |
-| `SUPERAGENT_UAT_APP_ID` | Optional. Turns on [user acceptance tests](#5-user-acceptance-tests): the numeric id of the GitHub App through which the `uat-gate` service publishes `superagent/uat`. With it, set `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`) and, for `uat-gate` only, `SUPERAGENT_UAT_APP_PRIVATE_KEY`; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
+| `SUPERAGENT_UAT_ENABLED` | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` service; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
 | `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` |
 | `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
 | `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
@@ -106,7 +106,7 @@ settings through the management API, so a new deployment starts configured:
 | Execution > Executor model | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set |
 | Execution > Concurrent Tickets | `$SUPERAGENT_MAX_WORKERS`, when set |
 | Execution > Prepare command | `/usr/local/bin/prepare-worktree.sh` |
-| Prompts > Delivery requirements | [`prompts/delivery.md`](prompts/delivery.md): the Claude Code review and merge procedure below, followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_APP_ID` is set |
+| Prompts > Delivery requirements | [`prompts/delivery.md`](prompts/delivery.md): the Claude Code review and merge procedure below, followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
 
 These values win over panel edits: change them in Coolify and redeploy. An
 unset optional variable leaves its setting to the panel. The Ticket directory
@@ -223,11 +223,11 @@ The command:
   Ticket directories, the repository checkout and the review checkouts.
 - These are prompt instructions to the DeepSeek worker, not a guarantee
   enforced by code: the worker could merge without a review. Branch protection
-  is the enforced part (CI, no force pushes to the base branch, and, with
-  [user acceptance tests](#5-user-acceptance-tests), the `superagent/uat` check
-  that only the UAT GitHub App can publish). The Claude Code review stays a
-  prompt-enforced step: its PR comment is written with the agent's own token,
-  so it is a record, not a security gate.
+  is the enforced part (CI, no force pushes to the base branch). The Claude Code
+  review and the [user acceptance tests](#5-user-acceptance-tests) are
+  independently executed, but their verdicts are enforced by the Delivery
+  requirements: their PR comments are written with the agent's own token, so
+  they are a record, not a security gate.
 
 ### Target repository setup
 
@@ -248,80 +248,93 @@ Coolify application for each further repository.
 Optional. When an issue has a `## User Acceptance Tests` section (format in
 [`templates/AGENTS.md`](templates/AGENTS.md)), an independent DeepSeek tester
 runs every scenario against the running pull request at its exact head commit,
-before the Claude Code review, and the pull request can merge only with a
-passing `superagent/uat` check on that commit. Without the section, the check
-passes as `NOT_REQUIRED` and says that nothing was tested.
+before the Claude Code review, and the worker merges only after a UAT pass
+that still holds for the head it merges. Without the section, the result is
+`NOT_REQUIRED` and says that nothing was tested.
 
-DSH Superagent stays the only orchestrator: its worker asks for UAT with
-[`uat-test`](scripts/uat-test) as a background job, exactly like
-`claude-review`, and decides what happens next. No GitHub Actions workflow takes
-part. A small trusted service, the UAT gate, only answers those requests:
+UAT follows the same trust model as the Claude Code review. DSH Superagent stays
+the only orchestrator: its worker runs [`uat-test`](scripts/uat-test) as a
+background job, exactly like `claude-review`, and the Delivery requirements
+([`prompts/delivery-uat.md`](prompts/delivery-uat.md)) tell it what each verdict
+means. The tests run independently of the worker, in containers it cannot
+reach, and their result is checked against the exact commit and the issue's
+current UAT spec, but nothing on GitHub enforces the verdict: there is no
+GitHub App, no `superagent/uat` check and no GitHub Actions workflow.
 
 ```mermaid
 flowchart TD
   P[DSH worker pushes head sha] --> U[uat-test repo pr sha, background job]
-  U -->|request: repo, PR, sha; never a verdict| G[uat-gate: derive issue, spec, environment from GitHub; check in progress]
-  G -->|no UAT section| N[App check success: NOT_REQUIRED]
+  U -->|request: repo, PR, sha; never a verdict| G[uat-gate: read issue, spec, environment from GitHub]
+  G -->|no UAT section| N[NOT_REQUIRED, exit 0]
   G --> R[uat-runner: sandbox + DeepSeek tester]
-  R --> V[uat-gate: validate evidence, re-derive, publish App check]
-  V -->|FAIL, exit 1| X[DSH worker fixes and pushes a new head]
+  R --> V[uat-gate: validate evidence, re-check head and spec, keep verdict]
+  V --> K[uat-test: check the record against sha and spec, post report on PR]
+  K -->|FAIL, exit 1| X[DSH worker fixes and pushes a new head]
   X --> P
-  V -->|BLOCKED, exit 2| B[DSH worker reports blocked, no merge]
-  V -->|PASS, exit 0| C[claude-review on the same sha]
+  K -->|BLOCKED, exit 2| B[DSH worker reports blocked, no merge]
+  K -->|PASS, exit 0| C[claude-review on the same sha]
   N --> C
   C -->|FAIL| X
-  C -->|PASS| M[uat-test --verify, then merge: App check + CI + review]
+  C -->|PASS| M[uat-test --verify, then merge: CI + review + squash merge]
 ```
 
 | Function | Owner |
 | --- | --- |
-| Tickets, dependencies, coder and reviewer order, retries, merge | DSH Superagent (`prompts/delivery.md`, `prompts/delivery-uat.md`) |
-| Asking for UAT of a head and waiting for it | [`uat-test`](scripts/uat-test), in the worker |
-| Reading the PR, issue, spec and policy; publishing `superagent/uat` | `uat-gate` ([`uat/gate.py`](uat/gate.py), [`uat/controller.py`](uat/controller.py)), with the UAT GitHub App |
+| Tickets, dependencies, coder, tester and reviewer order, retries, merge | DSH Superagent (`prompts/delivery.md`, `prompts/delivery-uat.md`) |
+| Asking for UAT of a head, checking and reporting its result | [`uat-test`](scripts/uat-test), in the worker |
+| Reading the PR, issue, spec and policy; keeping runs, verdicts and failure budgets | `uat-gate` ([`uat/gate.py`](uat/gate.py), [`uat/controller.py`](uat/controller.py)) |
 | Running the PR's code and the tester | `uat-runner`, an isolated Docker daemon |
-| Code review | [`claude-review`](scripts/claude-review), unchanged |
+| Code review | [`claude-review`](scripts/claude-review), which also refuses a head whose UAT has not passed |
 | Build and unit tests | the project's own CI, unchanged (GitHub Actions or not) |
+
+`uat-test` exits like `claude-review`: 0 for `PASS` or `NOT_REQUIRED` of exactly
+the given SHA, 1 for `FAIL` (back to the coder), 2 for `BLOCKED` (one retry when
+the runner or gate is at fault, else blocked, never merged), any other status
+for no verdict. It accepts the gate's record only for that exact SHA, PR and
+repository, and a pass only while it still holds for the PR's current head and
+its issue's current spec. It posts the report on the PR, once per run, as
+`claude-review` posts its review. Any new commit is a new head: both earlier
+results stop counting, and the head gets UAT and then a review again. Before
+merging, the worker runs `uat-test --verify` on the head it merges, then the
+existing merge procedure applies unchanged: a passing review of that head and
+title, every required CI check passed, no review requesting changes, and
+`gh pr merge --squash --match-head-commit`.
 
 ### Services and trust boundaries
 
 [`compose.yaml`](compose.yaml) adds two services next to `superagent`:
 
-- **`uat-gate`** ([image](uat/gate/Dockerfile)) holds the UAT App's private
-  key, the tester's DeepSeek key and a SQLite database on its own volume
-  (`uat_gate_state`: runs, at most one active run per PR, failure budgets and
-  each run's kept files). Its API, on the internal network only, answers
+- **`uat-gate`** ([image](uat/gate/Dockerfile)) holds a GitHub token it only
+  reads with (`SUPERAGENT_UAT_GITHUB_TOKEN`, a read-only token for contents,
+  issues and pull requests, or else the deployment's `GH_TOKEN`), the tester's
+  DeepSeek key and a SQLite database on its own volume (`uat_gate_state`: runs,
+  at most one active run per PR, failure budgets and each run's kept files). It
+  writes nothing on GitHub. Its API, on the internal network only, answers
   requests from the `superagent` service alone and with the shared
-  `SUPERAGENT_UAT_GATE_TOKEN`. The token lets the worker ask, never decide:
-  a request names a repository, PR and head SHA and nothing else, and the gate
+  `SUPERAGENT_UAT_GATE_TOKEN`. The token lets the worker ask, never decide: a
+  request names a repository, PR and head SHA and nothing else, and the gate
   re-reads everything the run is bound to from GitHub (the PR head, the issue
   its `Closes #<n>` names, the spec hash, `.superagent/uat.yaml`) and checks it
-  against its own policy. It mints short-lived installation tokens limited to
-  the repository and to checks write and contents, issues and pull requests
-  read. It runs no pull request code.
+  against its own policy. It runs no pull request code, and its GitHub token
+  reaches no container: it is used for API reads and, through the environment
+  of a single `git fetch`, for the checkout, and is redacted from kept files.
 - **`uat-runner`** is a Docker-in-Docker daemon, privileged as Docker in
   Docker requires, reachable only on the separate `uat` network and only with
   the TLS client certificate the gate holds. The PR's setup and start commands
   and the tester run in its containers: unprivileged, without capabilities,
   with memory, CPU and process limits, on per-run networks, never with the host
-  Docker socket, a GitHub token or the App key. Neither it nor its containers
-  can reach `superagent` (DSH's management API) or the dashboard.
-- **`superagent`** gets only the gate URL, the request token and the App id
-  (to check that a verdict it is given is the App's check on GitHub).
+  Docker socket or a GitHub token, so the tester cannot push, merge or change
+  the PR. Neither it nor its containers can reach `superagent` (DSH's
+  management API) or the dashboard.
+- **`superagent`** gets only the gate URL and the request token.
 
 Runs are keyed by repository, PR, head, spec hash and environment: a key that
 passed, failed or needs no UAT is answered again rather than re-run, a newer
 head replaces an active run (which becomes `STALE`), and a run the gate lost
 in a restart is run again once, then `BLOCKED`. A PR gets three failing rounds
 by default (`SUPERAGENT_UAT_MAX_FAILED_ROUNDS`), separately from its three
-failed reviews. Every App check run carries the PR's failed-round count, and
-the gate never counts fewer than its check runs show, so neither a restart, a
-force push nor a lost database restores rounds.
-
-Once a minute the gate re-derives every published `PASS` or `NOT_REQUIRED` of
-an open PR and publishes `STALE` when the issue's UAT or the environment
-changed; this only observes, it never starts a coder or reviewer step. Right
-before merging, the worker runs `uat-test --verify`, which does the same
-check at once.
+failed reviews, counted in the gate's database, so restarts of either service
+do not reset them; deleting the `uat_gate_state` volume does.
 
 The tester is DeepSeek Harness 0.2.1-rc.3 (`dsh --profile superagent-uat --json -`,
 prompt on stdin, [profile](uat/tester/profile.patch.yml) seeded from the
@@ -335,13 +348,18 @@ the tester's executed commands produced in a fresh directory
 answer, missing evidence, a PASS without executed commands) is `BLOCKED`.
 DSH's own transient model errors are retried once.
 
-| Verdict | Check conclusion | `uat-test` | Counts as a failing round |
+| Verdict | `uat-test` | Merge | Counts as a failing round |
 | --- | --- | --- | --- |
-| `PASS` | success | 0 | no |
-| `NOT_REQUIRED` | success | 0 | no |
-| `FAIL` (a scenario fails, or the PR cannot be set up, started or configured) | failure | 1 | yes |
-| `BLOCKED` (cannot run, invalid UAT section, environment not allowed, budget used up, runner or gate failure) | failure | 2 | no |
-| `STALE` (head, spec or environment changed) | failure | asks for a new run | no |
+| `PASS` | 0 | after a review pass, while it holds | no |
+| `NOT_REQUIRED` | 0 | after a review pass, while it holds | no |
+| `FAIL` (a scenario fails, or the PR cannot be set up, started or configured) | 1 | no | yes |
+| `BLOCKED` (cannot run, invalid UAT section, environment not allowed, budget used up, runner or gate failure) | 2 | no | no |
+| `STALE` (head, spec or environment changed) | asks for a new run | no | no |
+
+Verdicts are plain records in the gate (verdict, exact head SHA, spec hash,
+environment, report), independent of how they reach GitHub; a trusted
+publisher, such as a GitHub App for both UAT and the Claude Code review, can
+be added later on top of them.
 
 ### Local environment
 
@@ -369,90 +387,67 @@ preview, or a redirect off the allowed hosts, is `BLOCKED`. The tester reaches
 only the model API and the preview host. Optional test credentials
 (`SUPERAGENT_UAT_PREVIEW_CREDENTIALS`, a JSON object of values of 8+
 characters) are a read-only file for the tester and are redacted from kept
-files and the check. Point previews only at staging data: the tester names
-what it creates with a per-run prefix and deletes it, but never test against
+files and reports. Point previews only at staging data: the tester names what
+it creates with a per-run prefix and deletes it, but never test against
 production.
 
 ### Setup
 
-1. Use the existing UAT GitHub App, or create one owned by the organization
-   (not a user account): no webhook; repository permissions **Checks: read
-   and write**, **Contents: read**, **Issues: read**, **Pull requests: read**
-   (Metadata: read is implied). Install it on the target repository only.
-   Note its App ID and generate a private key.
-2. In Coolify, set `SUPERAGENT_UAT_APP_ID`, `SUPERAGENT_UAT_APP_PRIVATE_KEY`
-   and `SUPERAGENT_UAT_GATE_TOKEN` (`openssl rand -hex 32`), and the policy
-   variables you need ([`.env.example`](.env.example)), then redeploy. The
+1. In Coolify, set `SUPERAGENT_UAT_ENABLED=true`, `SUPERAGENT_UAT_GATE_TOKEN`
+   (`openssl rand -hex 32`) and the policy variables you need
+   ([`.env.example`](.env.example)); optionally `SUPERAGENT_UAT_GITHUB_TOKEN`, a
+   fine-grained token with read access to the repository's contents, issues and
+   pull requests, so the gate does not use the agent's `GH_TOKEN`. Redeploy: the
    Delivery requirements gain the UAT step and the worker gets `uat-test`.
-   Coolify must allow the privileged `uat-runner`; without it, every UAT run
+2. Coolify must allow the privileged `uat-runner`; without it, every UAT run
    ends `BLOCKED` (the runner is unavailable) and nothing merges.
-3. In a ruleset (or branch protection) on the default branch, require the
-   status check `superagent/uat` **with the UAT App as its source**, next to
-   the CI checks; block force pushes; give the agent account no bypass.
-4. Check the enforcement once on a test PR: posting
-   `gh api repos/<owner>/<repo>/statuses/<sha> -f state=success -f context=superagent/uat`
-   with the agent's token must not make the PR mergeable, and neither must a
-   failing UAT.
+3. Keep the required CI checks in branch protection as they are. Do not
+   require a `superagent/uat` check: nothing publishes it.
 
-Pull requests from forks, and to branches other than the default branch, are
-not tested and so cannot merge through the gate.
+### Moving from the GitHub App version
 
-### Moving from the GitHub Actions controller
+The previous version published a required `superagent/uat` check through a
+GitHub App (commit `4385d6f`). This version never publishes it, so a branch
+protection rule or ruleset that still requires it makes every pull request
+unmergeable. Before enabling this version:
 
-Earlier versions ran the controller as a `superagent-uat` workflow in the
-target repository (`templates/superagent-uat.yml` and `uat/action.yml`, last
-in commit `2365b7c`), with the same App and check name. Move without a moment
-in which `superagent/uat` is missing or can pass without the gate:
-
-1. Record the open PRs and their `superagent/uat` results, the required
-   check's source and the CI checks that stay required. The project's CI
-   workflows are not part of UAT and stay as they are.
-2. Deploy this version with `SUPERAGENT_UAT_CHECK_NAME=superagent/uat-shadow`.
-   The old workflow keeps publishing the required `superagent/uat`; the gate
-   publishes `superagent/uat-shadow` with the same App. Run a disposable PR
-   through both and compare their verdicts and evidence.
-3. Cut over: set `SUPERAGENT_UAT_CHECK_NAME` back to empty (`superagent/uat`)
-   and redeploy, then in one change on the default branch delete
-   `.github/workflows/superagent-uat.yml`. Keep the required check
-   `superagent/uat` with the UAT App as its source; it was already that App,
-   so the rule does not change. Failed rounds the workflow counted carry over:
-   they are in the same App's check runs.
-4. Ask for a run on each open PR (the worker's next `uat-test`, or a push); a
-   result the workflow published earlier still binds only its own head and
-   spec.
-5. Delete the `superagent-uat` and `superagent-uat-tester` environments and
-   their secrets, and the `SUPERAGENT_UAT_*` repository variables, in the
-   target repository: nothing reads them any more, and the App key no longer
-   belongs there.
-
-Rollback: restore the workflow from commit `2365b7c` (its pinned action still
-resolves) and redeploy that superagent version before touching the ruleset;
-never remove the required check to get through a migration.
+1. Remove `superagent/uat` from the required status checks of the default
+   branch (branch protection or ruleset), keeping the CI checks required.
+   Nothing changes branch protection automatically.
+2. Deploy with `SUPERAGENT_UAT_ENABLED=true` instead of `SUPERAGENT_UAT_APP_ID`,
+   and remove `SUPERAGENT_UAT_APP_ID`, `SUPERAGENT_UAT_APP_PRIVATE_KEY`,
+   `SUPERAGENT_UAT_INSTALLATION_ID` and `SUPERAGENT_UAT_CHECK_NAME` from Coolify.
+3. The gate's database carries over: its runs and failure budgets stay. Earlier
+   `superagent/uat` check runs stay on their commits as history; open PRs get
+   their next result from `uat-test`.
+4. The GitHub App can be uninstalled, or kept for a future trusted publisher.
 
 ### Troubleshooting
 
 - `uat-test` prints the verdict, each failing scenario with expected,
   observed and reproduction steps, the reasons for `BLOCKED` and the UAT run
-  id. `uat-test --artifact <run id> <path>` prints a kept file:
-  `outcome.json`, `setup.log`, `app-logs/app.log`, `proxy.log` (every allowed
-  and denied connection), and per attempt the prompt, the DSH NDJSON trace and
-  the evidence (`tester/attempt-1/…`, `tester-work/attempt-1/artifacts/…`),
-  with the DeepSeek key, the checkout token and test credentials redacted.
-  The App check shows the same report.
+  id, and posts the same report on the PR. `uat-test --artifact <run id> <path>`
+  prints a kept file: `outcome.json`, `setup.log`, `app-logs/app.log`,
+  `proxy.log` (every allowed and denied connection), and per attempt the
+  prompt, the DSH NDJSON trace and the evidence (`tester/attempt-1/…`,
+  `tester-work/attempt-1/artifacts/…`), with the DeepSeek key, the gate's
+  GitHub token and test credentials redacted.
 - `uat-test` exits 3 when the gate is unreachable for five minutes, refuses
-  the request (wrong token, repository or old head) or gives a verdict the
-  App's check on GitHub does not show. The `uat-gate` log has each request
-  and run (prefix `superagent-uat:`); `GET /healthz` says whether the gate is
-  configured.
-- A check stuck in progress: the gate failed to publish (GitHub outage) or
-  lost the run; the worker's next `uat-test` asks again. It never counts as a
-  pass.
+  the request (wrong token, repository or old head), returns a record that is
+  not for the given SHA, or the PR comment could not be posted. The
+  `uat-gate` log has each request and run (prefix `superagent-uat:`);
+  `GET /healthz` says whether the gate is configured.
+- `claude-review` exits 4 when UAT has not passed for its SHA: run `uat-test`
+  for that SHA first.
 - `BLOCKED` with "the UAT runner is unavailable": `uat-runner` is down, not
   privileged, or its client certificate did not reach the gate (see the
   `uat-gate` log at start).
 
 ### Limits
 
+- The UAT verdict, like the Claude Code review, is enforced by the Delivery
+  requirements and by `claude-review`'s own check, not by GitHub: a worker that
+  ignored them could merge without UAT. Branch protection still enforces CI.
 - The tester is a model: hostile output from the application could mislead
   it. The evidence rules stop answers without executed commands or evidence,
   not a tester convinced by a lying application.
@@ -463,14 +458,14 @@ never remove the required check to get through a migration.
 - `uat-runner` is privileged: a container escape from a sandbox reaches the
   runner and, through it, the host. Run the deployment on a host dedicated to
   it.
+- Without `SUPERAGENT_UAT_GITHUB_TOKEN`, the gate holds the agent's `GH_TOKEN`,
+  which can write; it only reads with it.
 - The issue is the one the PR closes (`Closes #<n>`); the Claude Code review
   reads the issue too. One PR may close at most one issue with UAT.
-- Between an issue edit and the gate publishing `STALE` (at most a minute,
-  unless `uat-test --verify` runs first), the earlier result is still on the
-  head.
+- An issue edit after a pass is caught when `uat-test --verify` runs before
+  the merge, not earlier.
 - Setup commands run the PR's code with network access on the runner, as CI
   does, but with no credential.
-- The Claude Code review is still prompt-enforced, not a required check.
 
 Run the tests with `python3 -m unittest discover -s uat/tests -t .`; those
 that need Docker build the images and drive real DSH against a scripted model

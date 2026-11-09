@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The `gh api` and `gh pr view --json headRefOid` subset uat-test uses, against FAKE_GITHUB_URL."""
+"""The `gh pr view` and `gh pr comment` subset uat-test and claude-review use, against FAKE_GITHUB_URL."""
 import json
 import os
 import sys
@@ -9,7 +9,7 @@ import urllib.request
 
 def call(method, path, body=None):
     request = urllib.request.Request(f'{os.environ["FAKE_GITHUB_URL"]}/{path.lstrip("/")}', method=method,
-                                     data=None if body is None else body.encode(),
+                                     data=None if body is None else json.dumps(body).encode(),
                                      headers={'authorization': f'token {os.environ["FAKE_GITHUB_TOKEN"]}'})
     try:
         with urllib.request.urlopen(request) as response:
@@ -19,12 +19,12 @@ def call(method, path, body=None):
 
 
 args = sys.argv[1:]
-if args[0] == 'api':
-    method = args[args.index('--method') + 1] if '--method' in args else 'GET'
-    path = next(arg for arg in args[1:] if arg.startswith('repos/'))
-    print(call(method, path, sys.stdin.read() if '--input' in args else None))
-elif args[:2] == ['pr', 'view']:
-    pr = json.loads(call('GET', f'repos/{args[args.index("--repo") + 1]}/pulls/{args[2]}'))
-    print(json.dumps({'headRefOid': pr['head']['sha']}))
+repository = args[args.index('--repo') + 1] if '--repo' in args else None
+if args[:2] == ['pr', 'view']:
+    pr = json.loads(call('GET', f'repos/{repository}/pulls/{args[2]}'))
+    fields = {'headRefOid': pr['head']['sha'], 'baseRefName': 'main', 'title': pr['title']}
+    print(json.dumps({name: fields[name] for name in args[args.index('--json') + 1].split(',')}))
+elif args[:2] == ['pr', 'comment'] and '--body-file' in args:
+    call('POST', f'repos/{repository}/issues/{args[2]}/comments', {'body': sys.stdin.read()})
 else:
     sys.exit(f'fake gh: unsupported {args}')

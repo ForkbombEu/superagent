@@ -64,9 +64,8 @@ The agent account `@forkboteu` squash-merges a pull request it opened, without
 further human approval, once an independent Claude Code review of the pull
 request's exact head commit passes and all required CI checks pass
 (`gh pr merge --squash --match-head-commit <reviewed sha>`). When the
-deployment runs user acceptance tests, those checks include `superagent/uat`
-on that commit, published by the deployment's UAT GitHub App (see "User
-acceptance tests" below). It
+deployment runs user acceptance tests, that commit must also have passed them
+first (see "User acceptance tests" below). It
 never merges any other pull request, never uses `--admin` or bypasses branch
 protection, and does not merge work whose issue or comment explicitly forbids
 merging. Every other merge needs human approval.
@@ -141,7 +140,8 @@ leave it out when no end-to-end check applies.
 When the deployment enables them, an independent DeepSeek tester runs an
 issue's user acceptance tests (UAT) against the pull request's exact head
 commit after the agent pushes it, before the Claude Code review, and the
-pull request merges only with a passing `superagent/uat` check on that commit.
+pull request merges only after UAT passed for that commit; the tester's report
+is posted on the pull request.
 UAT checks what a user or client observes from the running application (HTTP
 responses, pages, files, command output), not unit tests or the code itself:
 the tester runs every scenario and keeps evidence of what it saw.

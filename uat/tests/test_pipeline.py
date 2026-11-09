@@ -63,7 +63,7 @@ class RunnerGate(Gate):
     def run_gate(self, steps, **policy):
         """Request a run of the head, script the model with the run's own metadata, run it; (run, kept files)."""
         self.gate = self.make_gate(
-            executor=gate.Runner(lambda: 'ghs_checkout_token_123456', f'file://{self.server}'),
+            executor=gate.Runner('ghs_checkout_token_123456', f'file://{self.server}'),
             DEEPSEEK_API_KEY='sk-pipeline-secret-key', DEEPSEEK_BASE_URL=f'http://{self.network}-mock:8080',
             SUPERAGENT_UAT_PROXY_NETWORKS=self.network, SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES='3', **policy)
         run = self.request()
@@ -87,7 +87,7 @@ class LocalPipelineTest(RunnerGate):
                  {'bash': 'cp /app-logs/app.log artifacts/app.log'}, {'final': 'RESULT'}]
         run, kept = self.run_gate(steps)
         self.assertEqual(run['verdict'], 'PASS', run)
-        self.assertTrue(self.gh.required_check_passes(self.sha))
+        self.assertEqual(run['head_sha'], self.sha)
         with open(os.path.join(kept, 'tester-work', 'attempt-1', 'artifacts', 'uat-1-create.txt')) as file:
             self.assertIn('201 Created', file.read())
         self.assertTrue(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
@@ -96,7 +96,7 @@ class LocalPipelineTest(RunnerGate):
         run, _ = self.run_gate([{'final': 'RESULT'}])
         self.assertEqual(run['verdict'], 'BLOCKED')
         self.assertIn('executed no command', run['summary'])
-        self.assertFalse(self.gh.required_check_passes(self.sha))
+        self.assertFalse(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
 
     def test_secrets_never_reach_the_kept_files(self):
         steps = [{'bash': 'echo "$DEEPSEEK_API_KEY $GH_TOKEN" > artifacts/env.txt; cat /proc/1/environ > artifacts/p1 2>&1; '
@@ -140,17 +140,16 @@ class PreviewPipelineTest(RunnerGate):
             for name in names:
                 with open(os.path.join(root, name), 'rb') as file:
                     self.assertNotIn(b'long-enough-preview-secret', file.read(), os.path.join(root, name))
-        check, marker = self.latest(self.sha)
-        self.assertEqual((check['conclusion'], marker['verdict']), ('success', 'PASS'))
-        self.assertNotIn('long-enough-preview-secret', json.dumps(check) + json.dumps(run))
-        self.assertIn('[REDACTED]', check['output']['summary'])
+        self.assertTrue(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
+        self.assertNotIn('long-enough-preview-secret', json.dumps(run))
+        self.assertIn('[REDACTED]', run['summary'])
 
     def test_stale_preview_is_blocked_before_any_test(self):
         run, kept = self.run_gate([{'final': 'RESULT'}], **self.deploy('d' * 40))
         self.assertEqual(run['verdict'], 'BLOCKED')
         self.assertIn('stale', run['summary'])
         self.assertFalse(os.path.exists(os.path.join(kept, 'tester')))
-        self.assertFalse(self.gh.required_check_passes(self.sha))
+        self.assertFalse(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
 
     def test_unavailable_preview_is_blocked(self):
         policy = self.deploy(self.sha)

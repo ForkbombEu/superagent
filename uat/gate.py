@@ -1,8 +1,8 @@
-"""The trusted UAT gate service: `python3 -m uat.gate` (the uat-gate service in compose.yaml).
+"""The UAT gate service: `python3 -m uat.gate` (the uat-gate service in compose.yaml).
 
 DSH Superagent stays the only orchestrator: its worker asks for a test of a
-PR head with scripts/uat-test and decides what to do with the answer. The
-gate only supervises the run it is asked for:
+PR head with scripts/uat-test and decides what to do with the answer, as it
+does with claude-review. The gate only runs and keeps the run it is asked for:
 
   POST /v1/uat/runs            {"repository", "pr", "head_sha"} -> the run (new or the same key's)
   GET  /v1/uat/runs/<id>                                         -> the run and, once complete, its report
@@ -12,17 +12,16 @@ gate only supervises the run it is asked for:
 
 A request carries no verdict and the API accepts no other field. Requests need
 the shared bearer token and must come from an allowed client host (the
-superagent service), but a requester is untrusted all the same: everything a
-run is bound to is re-read from GitHub (uat.controller.derive), and only the
-gate, through the GitHub App, publishes `superagent/uat`.
+superagent service), and everything a run is bound to (PR head, issue, spec
+hash, environment) is re-read from GitHub (uat.controller.derive) with a
+GitHub read credential that never reaches a container. The gate publishes
+nothing on GitHub: the verdict reaches the PR through uat-test, and the merge
+is enforced by the Delivery requirements, as for the Claude Code review.
 
 State is a SQLite database on a gate-only volume: runs, at most one active run
-per PR (a unique index), the PR failure budgets (never below the count the
-App's check runs carry) and each run's kept artifacts. PR code runs only on the
-runner, the Docker daemon DOCKER_HOST names (uat-runner), never in this
-container. Once a minute the gate re-derives every published PASS or
-NOT_REQUIRED of an open PR and publishes STALE when its issue's UAT or the
-environment changed: observation, never a new coder or reviewer step.
+per PR (a unique index), the PR failure budgets and each run's kept artifacts;
+it survives restarts. PR code runs only on the runner, the Docker daemon
+DOCKER_HOST names (uat-runner), never in this container.
 """
 import collections
 import hmac
@@ -39,7 +38,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from uat import controller, run, sandbox
 from uat import result as results
-from uat.app import InstallationToken
 from uat.github import GitHub, GitHubError
 
 ACTIVE, COMPLETE = ('QUEUED', 'RUNNING'), 'COMPLETE'
@@ -52,8 +50,8 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, repository TEXT NOT NULL, pr INTEGER NOT NULL, head_sha TEXT NOT NULL,
   key TEXT NOT NULL, issue INTEGER, spec_sha256 TEXT, environment TEXT, status TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE')), verdict TEXT,
-  check_id INTEGER, failed_rounds INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
-  watch INTEGER NOT NULL DEFAULT 0, snapshot TEXT, title TEXT, summary TEXT, text TEXT,
+  failed_rounds INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+  snapshot TEXT, title TEXT, summary TEXT, text TEXT,
   created REAL NOT NULL, updated REAL NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_pr ON runs (repository, pr) WHERE state != 'COMPLETE';
 CREATE INDEX IF NOT EXISTS runs_by_key ON runs (key, created);
@@ -107,17 +105,16 @@ class Gate:
         with self.lock:
             changed = self.db.execute(
                 'UPDATE runs SET state = ?, verdict = ?, failed_rounds = ?, title = ?, summary = ?, text = ?, '
-                'watch = ?, updated = ? WHERE id = ? AND state = ?',
-                (COMPLETE, verdict, failed_rounds, title, summary, text,
-                 int(verdict in (controller.PASS, controller.NOT_REQUIRED)), time.time(), run_id, expected_state)).rowcount
+                'updated = ? WHERE id = ? AND state = ?',
+                (COMPLETE, verdict, failed_rounds, title, summary, text, time.time(), run_id, expected_state)).rowcount
         return changed == 1
 
-    @staticmethod
-    def view(row):
+    def view(self, row):
+        """A run as uat-test sees it: its binding (exact head SHA, spec hash, environment) and verdict."""
         answer = {'run_id': row['id'], 'repository': row['repository'], 'pr': row['pr'], 'head_sha': row['head_sha'],
                   'issue': row['issue'], 'spec_sha256': row['spec_sha256'], 'environment': row['environment'],
-                  'state': row['state'], 'verdict': row['verdict'], 'check_id': row['check_id'],
-                  'failed_rounds': row['failed_rounds']}
+                  'state': row['state'], 'verdict': row['verdict'], 'failed_rounds': row['failed_rounds'],
+                  'max_failed_rounds': self.ctx.policy.max_failed_rounds}
         if row['state'] == COMPLETE:
             answer.update(title=row['title'], summary=row['summary'], text=row['text'])
         return answer
@@ -153,20 +150,17 @@ class Gate:
                                      repository, pr, COMPLETE):
                 self.supersede(active)
             prior = self.budget(repository, pr)
-            if found['status'] in ('READY', controller.FAIL):
-                prior = max(prior, controller.ledger_failed_rounds(ctx, found))
             run_id = uuid.uuid4().hex[:16]
-            verdict, failed, check, title, summary, snapshot = controller.admit(ctx, found, prior, run_id)
+            verdict, failed, title, summary, snapshot = controller.admit(ctx, found, prior, run_id)
             now = time.time()
             final = snapshot is None
             self.query('INSERT INTO runs (id, repository, pr, head_sha, key, issue, spec_sha256, environment, status, '
-                       'state, verdict, check_id, failed_rounds, watch, snapshot, title, summary, text, created, updated) '
-                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       'state, verdict, failed_rounds, snapshot, title, summary, text, created, updated) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        run_id, repository, pr, head_sha, found['key'], found['issue'], found['spec_sha256'],
                        found['environment'], found['status'], COMPLETE if final else 'QUEUED',
-                       verdict if final else None, check, failed, int(verdict == controller.NOT_REQUIRED),
-                       None if final else json.dumps(snapshot), title if final else None,
-                       summary if final else None, '' if final else None, now, now)
+                       verdict if final else None, failed, None if final else json.dumps(snapshot),
+                       title if final else None, summary if final else None, '' if final else None, now, now)
             self.raise_budget(repository, pr, failed)
         with self.wake:
             self.wake.notify_all()
@@ -174,14 +168,11 @@ class Gate:
 
     def supersede(self, active):
         """A newer request for the PR replaces an active run: STALE, and its containers go."""
-        snapshot = json.loads(active['snapshot'])
-        title, summary, text = 'UAT result is stale', (
+        title, summary = 'UAT result is stale', (
             f'A request for a newer head or spec replaced UAT run `{active["id"]}`; this result applies to nothing '
-            'current.'), ''
-        if self.finish_run(active['id'], controller.STALE, active['failed_rounds'], title, summary, text, active['state']):
+            'current.')
+        if self.finish_run(active['id'], controller.STALE, active['failed_rounds'], title, summary, '', active['state']):
             sandbox.remove(f'superagent-uat-{active["id"]}')
-            controller.publish(self.ctx, snapshot, controller.STALE, title, summary, active['failed_rounds'],
-                               check_id=active['check_id'], run_id=active['id'])
 
     def verify(self, repository, pr, head_sha):
         """Before merging: does a PASS or NOT_REQUIRED for this head still hold under the current issue and policy?"""
@@ -193,15 +184,10 @@ class Gate:
                 return {'current': False, 'reason': 'no passing UAT result for this head', 'run': row and self.view(row)}
             state = controller.revalidate(self.ctx, self.done(row))
             if state != 'current':
-                self.query('UPDATE runs SET watch = 0, verdict = ?, updated = ? WHERE id = ?',
+                self.query('UPDATE runs SET verdict = ?, updated = ? WHERE id = ?',
                            controller.STALE if state == 'stale' else row['verdict'], time.time(), row['id'])
                 return {'current': False, 'reason': 'the PR head moved or closed' if state == 'moot' else
                         'the issue\'s UAT or the environment changed since this result; it is now STALE',
-                        'run': self.view(row)}
-            latest = next(iter(controller.app_check_runs(self.ctx, head_sha)), None)
-            marker = controller.marker_of(latest) if latest else None
-            if not marker or marker.get('run_id') != row['id'] or latest.get('conclusion') != 'success':
-                return {'current': False, 'reason': 'the newest superagent/uat check on this head is not this result',
                         'run': self.view(row)}
             return {'current': True, 'reason': 'the result holds for the current head, issue and policy',
                     'run': self.view(row)}
@@ -265,7 +251,7 @@ class Gate:
             remove_dir(run_dir)
         current = self.one('SELECT state FROM runs WHERE id = ?', row['id'])
         if current['state'] != 'RUNNING':
-            return  # Superseded meanwhile: already STALE on GitHub.
+            return  # Superseded meanwhile: already STALE.
         verdict, failed, title, summary, text = controller.conclude(self.ctx, snapshot, outcome)
         if self.finish_run(row['id'], verdict, failed, title, summary, text, 'RUNNING'):
             self.raise_budget(row['repository'], row['pr'], failed)
@@ -279,35 +265,24 @@ class Gate:
                 self.query("UPDATE runs SET state = 'QUEUED', updated = ? WHERE id = ?", time.time(), row['id'])
                 continue
             title, summary = 'UAT blocked', 'The UAT gate restarted during this run twice; it was not completed.'
-            if self.finish_run(row['id'], controller.BLOCKED, row['failed_rounds'], title, summary, '', 'RUNNING'):
-                controller.publish(self.ctx, json.loads(row['snapshot']), controller.BLOCKED, title, summary,
-                                   row['failed_rounds'], check_id=row['check_id'], run_id=row['id'])
+            self.finish_run(row['id'], controller.BLOCKED, row['failed_rounds'], title, summary, '', 'RUNNING')
 
-    def observe(self):
-        """Mark published passes STALE when what they were bound to changed, and drop old artifacts."""
-        for row in self.query('SELECT * FROM runs WHERE watch = 1 ORDER BY created'):
-            try:
-                state = controller.revalidate(self.ctx, self.done(row))
-            except GitHubError as error:
-                controller.log(f'revalidating run {row["id"]}: {error}')
-                continue
-            if state != 'current':
-                self.query('UPDATE runs SET watch = 0, verdict = ?, updated = ? WHERE id = ?',
-                           controller.STALE if state == 'stale' else row['verdict'], time.time(), row['id'])
+    def cleanup(self):
+        """Drop the kept files of runs older than the retention period (their records stay)."""
         for row in self.query('SELECT id FROM runs WHERE state = ? AND updated < ?', COMPLETE, time.time() - self.retention):
             shutil.rmtree(os.path.join(self.state_dir, 'runs', row['id']), ignore_errors=True)
 
-    def start(self, interval=60):
+    def start(self, interval=3600):
         for _ in range(self.concurrency):
             threading.Thread(target=self.work, daemon=True).start()
 
-        def observing():
+        def cleaning():
             while not self.stopping.wait(interval):
                 try:
-                    self.observe()
-                except Exception as error:
-                    controller.log(f'observation failed: {error!r}')
-        threading.Thread(target=observing, daemon=True).start()
+                    self.cleanup()
+                except OSError as error:
+                    controller.log(f'cleanup failed: {error!r}')
+        threading.Thread(target=cleaning, daemon=True).start()
 
 
 def remove_dir(path):
@@ -317,7 +292,8 @@ def remove_dir(path):
 
 
 class Runner:
-    """The default executor: build the images once on the runner, then controller.execute."""
+    """The default executor: build the images once on the runner, then controller.execute.
+    `token` is the gate's GitHub read credential, used only for the checkout and redacted from kept files."""
 
     def __init__(self, token, server):
         self.token, self.server, self.images, self.lock = token, server, None, threading.Lock()
@@ -329,7 +305,7 @@ class Runner:
                     self.images = controller.build_images('gate')
         except Exception as error:
             return results.Outcome(controller.BLOCKED, [f'the UAT runner is unavailable: {type(error).__name__}: {error}'])
-        return controller.execute(ctx, snapshot, run_dir, self.images, token=self.token(), server=self.server)
+        return controller.execute(ctx, snapshot, run_dir, self.images, token=self.token, server=self.server)
 
 
 # HTTP.
@@ -419,41 +395,32 @@ def handler(gate, token, clients):
     return Handler
 
 
-def private_key_file(environ, directory):
-    """The App key as a file only this process reads; the variables holding it leave the environment."""
-    path = environ.pop('SUPERAGENT_UAT_APP_PRIVATE_KEY_FILE', '')
-    key = environ.pop('SUPERAGENT_UAT_APP_PRIVATE_KEY', '')
-    if path or not key:
-        return path
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    path = os.path.join(directory, 'app.pem')
-    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as file:
-        file.write(key.replace('\\n', '\n').strip() + '\n')
-    return path
+def github_token(environ):
+    """The gate's GitHub read credential; every variable that may hold one leaves the environment, so no
+    child process (docker, git) inherits it."""
+    tokens = [environ.pop(name, '') for name in ('SUPERAGENT_UAT_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN')]
+    return next((token for token in tokens if token), '')
 
 
 def main():
     environ = os.environ
-    key_path = private_key_file(environ, environ.get('SUPERAGENT_UAT_SECRET_DIR', '/run/uat-gate'))
+    github = github_token(environ)
     token = environ.pop('SUPERAGENT_UAT_GATE_TOKEN', '')
     repository = environ.get('GITHUB_REPOSITORY', '')
     policy = controller.Policy(environ)
-    configured = bool(policy.app_id and key_path and repository and len(token) >= 32)
     gate = None
-    if configured:
-        installation = InstallationToken(policy.app_id, key_path, repository,
-                                         installation_id=environ.get('SUPERAGENT_UAT_INSTALLATION_ID') or None)
-        ctx = controller.Context(repository, GitHub(installation), policy)
+    if github and repository and len(token) >= 32:
+        ctx = controller.Context(repository, GitHub(github), policy)
         gate = Gate(ctx, environ.get('SUPERAGENT_UAT_STATE_DIR', '/var/lib/uat-gate'),
                     environ.get('SUPERAGENT_UAT_WORK_DIR', '/var/lib/uat-work'),
-                    executor=Runner(installation, environ.get('GITHUB_SERVER_URL', 'https://github.com')),
+                    executor=Runner(github, environ.get('GITHUB_SERVER_URL', 'https://github.com')),
                     concurrency=int(environ.get('SUPERAGENT_UAT_CONCURRENCY') or 2),
                     retention_days=int(environ.get('SUPERAGENT_UAT_RETENTION_DAYS') or 30))
         gate.recover()
-        gate.start(int(environ.get('SUPERAGENT_UAT_REVALIDATE_SECONDS') or 60))
+        gate.start()
     else:
-        controller.log('not configured (SUPERAGENT_UAT_APP_ID, the App private key, GITHUB_REPOSITORY and a '
-                       'SUPERAGENT_UAT_GATE_TOKEN of 32+ characters): answering 503')
+        controller.log('not configured (a GitHub read token in SUPERAGENT_UAT_GITHUB_TOKEN or GH_TOKEN, '
+                       'GITHUB_REPOSITORY and a SUPERAGENT_UAT_GATE_TOKEN of 32+ characters): answering 503')
     clients = (environ.get('SUPERAGENT_UAT_GATE_CLIENTS') or 'superagent').split()
     server = ThreadingHTTPServer(('0.0.0.0', int(environ.get('SUPERAGENT_UAT_GATE_PORT') or 8090)),
                                  handler(gate, token, clients))

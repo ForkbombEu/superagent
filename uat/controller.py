@@ -1,24 +1,24 @@
-"""The trusted UAT logic the gate service (uat/gate.py) runs. It orchestrates nothing.
+"""The UAT logic the gate service (uat/gate.py) runs. It orchestrates nothing.
 
 DSH Superagent decides when a PR head is tested and what happens next; it asks
 the gate through scripts/uat-test. For one requested run this module:
 
 - derive: reads the PR head, the issue it closes, the UAT spec and
-  .superagent/uat.yaml from GitHub alone (never from the requester) and checks
-  them against the protected policy;
-- admit: publishes `superagent/uat` through the GitHub App on that head, either
-  the verdict at once (no UAT, blocked, budget used up) or in progress;
+  .superagent/uat.yaml from GitHub (read access only, never from the
+  requester) and checks them against the protected policy;
+- admit: decides what the request leads to, either a verdict at once (no UAT,
+  blocked, budget used up) or a run;
 - execute: checks out the head and runs the sandbox and the DeepSeek tester on
   the isolated runner, then evaluates their output (uat.result);
 - conclude: re-derives the binding, so a new head, spec or environment makes
-  the result STALE, counts the failed round and publishes the verdict;
-- revalidate: marks a published PASS stale when the spec it was bound to changed.
+  the result STALE, counts the failed round and writes the report;
+- revalidate: tells whether a PASS or NOT_REQUIRED still holds for the current
+  head, spec and environment.
 
-Each check run carries a marker (a JSON comment in its text) that only the App
-can write: its verdict, idempotency key and the PR's failed rounds so far, so
-the failure budget also survives the loss of the gate's own database.
+Results are plain data (verdict, binding, title, summary, text) that the gate
+keeps and gives to uat-test; nothing here publishes to GitHub, so a trusted
+publisher can be added later without touching this module.
 """
-import datetime
 import json
 import os
 import re
@@ -31,22 +31,17 @@ from uat.github import GitHubError
 
 NOT_REQUIRED, STALE, PENDING = 'NOT_REQUIRED', 'STALE', 'PENDING'
 PASS, FAIL, BLOCKED = results.PASS, results.FAIL, results.BLOCKED
-MARKER = re.compile(r'<!-- superagent-uat (\{.*?\}) -->')
 UAT = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PATTERN = re.compile(r'\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,})\b')
 LINKS = '''query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-    closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
-    timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100) {
-      nodes { ... on HeadRefForcePushedEvent { beforeCommit { oid } } } } } } }'''
+    closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } } } } }'''
 
 
 class Policy:
     """The protected policy: the gate's own environment, never the PR, the issue or the requester."""
 
     def __init__(self, environ):
-        self.app_id = int(environ.get('SUPERAGENT_UAT_APP_ID') or 0)
-        self.check_name = environ.get('SUPERAGENT_UAT_CHECK_NAME') or 'superagent/uat'
         self.environments = set(re.split(r'[\s,]+', (environ.get('SUPERAGENT_UAT_ENVIRONMENTS') or 'local').strip())) - {''}
         self.max_failed_rounds = int(environ.get('SUPERAGENT_UAT_MAX_FAILED_ROUNDS') or 3)
         self.tester_timeout = int(environ.get('SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES') or 30) * 60
@@ -64,7 +59,7 @@ class Policy:
 
 
 class Context:
-    """One repository: its GitHub App client and the policy."""
+    """One repository: its GitHub client (read access) and the policy."""
 
     def __init__(self, repository, github, policy):
         self.repository, self.github, self.policy = repository, github, policy
@@ -81,13 +76,10 @@ def derive(ctx, number):
     """Everything the verdict is bound to, as a dict whose `status` is READY, NOT_REQUIRED, BLOCKED, FAIL or CLOSED."""
     gh, policy = ctx.github, ctx.policy
     pr = gh.get(f'repos/{ctx.repository}/pulls/{number}')
-    found = {'pr': number, 'sha': pr['head']['sha'], 'issue': None, 'environment': None, 'spec_sha256': None,
-             'befores': []}
+    found = {'pr': number, 'sha': pr['head']['sha'], 'issue': None, 'environment': None, 'spec_sha256': None}
     if pr['state'] != 'open':
         return {**found, 'status': 'CLOSED', 'reason': 'the pull request is not open'}
     links = gh.graphql(LINKS, owner=ctx.owner, name=ctx.name, number=number)['repository']['pullRequest']
-    found['befores'] = [node['beforeCommit']['oid'] for node in links['timelineItems']['nodes']
-                        if node and node.get('beforeCommit')]
 
     def verdict(status, reason, **more):
         found.update(more)
@@ -147,59 +139,9 @@ def derive(ctx, number):
                    spec=parsed, entry=entry, issue_updated_at=updated_at)
 
 
-# Check runs and their markers.
-
-def marker_of(check_run):
-    match = MARKER.search((check_run.get('output') or {}).get('text') or '')
-    return json.loads(match.group(1)) if match else None
-
-
-def app_check_runs(ctx, sha):
-    """This App's check runs of the UAT check name on a commit, newest (highest id) first."""
-    name, app_id = ctx.policy.check_name, ctx.policy.app_id
-    runs = ctx.github.paginate(f'repos/{ctx.repository}/commits/{sha}/check-runs', key='check_runs',
-                               check_name=name, app_id=app_id, filter='all')
-    runs = [run for run in runs if (run.get('app') or {}).get('id') == app_id and run['name'] == name]
-    return sorted(runs, key=lambda run: run['id'], reverse=True)
-
-
-def ledger_failed_rounds(ctx, found):
-    """The PR's failed rounds recorded on GitHub: the largest count any App check run on its commits carries.
-
-    This includes the check runs the earlier GitHub Actions controller published with the same App
-    and check name, so moving to the gate grants no extra rounds."""
-    shas = {commit['sha'] for commit in ctx.github.paginate(f'repos/{ctx.repository}/pulls/{found["pr"]}/commits', limit=250)}
-    shas |= set(found['befores']) | {found['sha']}
-    counts = [marker.get('failed_rounds', 0) for sha in sorted(shas) for run in app_check_runs(ctx, sha)
-              if (marker := marker_of(run)) and marker.get('pr') == found['pr']]
-    return max(counts, default=0)
-
-
 def clean(text, limit):
     text = TOKEN_PATTERN.sub('[REDACTED]', text)
     return text if len(text) <= limit else text[:limit - 40] + '\n\n(truncated)'
-
-
-def publish(ctx, found, verdict, title, summary, failed_rounds, text='', check_id=None, run_id=None):
-    """Create or complete the App check run on found['sha']; return its id."""
-    marker = {'v': 1, 'verdict': verdict, 'key': found['key'], 'pr': found['pr'], 'issue': found['issue'],
-              'sha': found['sha'], 'spec_sha256': found['spec_sha256'], 'environment': found['environment'],
-              'failed_rounds': failed_rounds, 'max_failed_rounds': ctx.policy.max_failed_rounds, 'run_id': run_id}
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    body = {'name': ctx.policy.check_name, 'external_id': (run_id or found['key'])[:255],
-            'output': {'title': clean(title, 255), 'summary': clean(summary, 60000),
-                       'text': clean(text, 60000) + f'\n\n<!-- superagent-uat {json.dumps(marker)} -->'}}
-    if verdict == PENDING:
-        body.update(status='in_progress', started_at=now)
-    else:
-        body.update(status='completed', completed_at=now, conclusion='success' if verdict in (PASS, NOT_REQUIRED) else 'failure')
-    if check_id:
-        ctx.github.request('PATCH', f'repos/{ctx.repository}/check-runs/{check_id}', body)
-        log(f'{verdict} published on {found["sha"]} (check run {check_id})')
-        return check_id
-    created = ctx.github.request('POST', f'repos/{ctx.repository}/check-runs', {**body, 'head_sha': found['sha']})
-    log(f'{verdict} published on {found["sha"]} (check run {created["id"]})')
-    return created['id']
 
 
 def bound(found):
@@ -209,8 +151,8 @@ def bound(found):
 # One requested run.
 
 def admit(ctx, found, prior, run_id):
-    """Publish what a request leads to: (verdict, failed rounds, check id, title, summary, snapshot). The
-    snapshot is None when the verdict is final; else the verdict is PENDING and execute runs the snapshot."""
+    """What a request leads to: (verdict, failed rounds, title, summary, snapshot). The snapshot is None
+    when the verdict is final; else the verdict is PENDING and execute runs the snapshot."""
     rounds = ctx.policy.max_failed_rounds
     if found['status'] in (FAIL, spec.READY) and prior >= rounds:
         verdict, failed, title, summary = BLOCKED, prior, 'UAT blocked: no failing rounds left', (
@@ -228,16 +170,16 @@ def admit(ctx, found, prior, run_id):
         verdict, failed, title, summary = PENDING, prior, 'UAT running', (
             f'Testing {len(found["spec"].scenarios)} scenarios of issue #{found["issue"]} in the '
             f'`{found["environment"]}` environment ({prior} of {rounds} failing rounds used).')
-    check = publish(ctx, found, verdict, title, summary, failed, run_id=run_id)
+    log(f'PR #{found["pr"]} at {found["sha"]}: {verdict}')
     if verdict != PENDING:
-        return verdict, failed, check, title, summary, None
-    snapshot = {**bound(found), 'entry': found['entry'], 'check_id': check, 'failed_rounds': prior, 'run_id': run_id,
+        return verdict, failed, title, summary, None
+    snapshot = {**bound(found), 'entry': found['entry'], 'failed_rounds': prior, 'run_id': run_id,
                 'issue_updated_at': found['issue_updated_at'],
                 'canonical': spec.canonical(found['spec'], found['environment']),
                 'meta': {'repository': ctx.repository, 'issue_number': found['issue'], 'pr_number': found['pr'],
                          'head_sha': found['sha'], 'uat_spec_sha256': found['spec_sha256'],
                          'environment': found['environment'], 'environment_revision': found['sha']}}
-    return PENDING, prior, check, title, summary, snapshot
+    return PENDING, prior, title, summary, snapshot
 
 
 def redact_tree(directory, secrets):
@@ -328,7 +270,7 @@ def execute(ctx, snapshot, run_dir, images, token=None, server='https://github.c
 
 
 def report(snapshot, outcome, failed_rounds, max_rounds):
-    """(title, summary, text) of a finished run for the check run and uat-test."""
+    """(title, summary, text) of a finished run, for uat-test and the PR comment it posts."""
     result = outcome.result or {}
     scenarios = result.get('scenarios') or []
     cell = lambda value: str(value).replace('|', '\\|').replace('\n', ' ')[:300]
@@ -361,7 +303,7 @@ def report(snapshot, outcome, failed_rounds, max_rounds):
 
 
 def conclude(ctx, snapshot, outcome):
-    """Re-derive the binding and publish the run's verdict. (verdict, failed rounds, title, summary, text)."""
+    """Re-derive the binding and write the run's report. (verdict, failed rounds, title, summary, text)."""
     if outcome.verdict not in (PASS, FAIL, BLOCKED, STALE):
         outcome = results.Outcome(BLOCKED, [f'unknown verdict {outcome.verdict!r}'])
     if outcome.verdict != STALE:
@@ -375,21 +317,14 @@ def conclude(ctx, snapshot, outcome):
                                               'to nothing current'], result=outcome.result)
     failed_rounds = snapshot['failed_rounds'] + (1 if outcome.verdict == FAIL else 0)
     title, summary, text = report(snapshot, outcome, failed_rounds, ctx.policy.max_failed_rounds)
-    publish(ctx, snapshot, outcome.verdict, title, summary, failed_rounds, text, check_id=snapshot['check_id'],
-            run_id=snapshot['run_id'])
-    return outcome.verdict, failed_rounds, title, summary, text
+    log(f'run {snapshot["run_id"]} on {snapshot["sha"]}: {outcome.verdict}')
+    return outcome.verdict, failed_rounds, clean(title, 255), clean(summary, 60000), clean(text, 60000)
 
 
 def revalidate(ctx, done):
-    """For a published PASS or NOT_REQUIRED (`done`: its bound fields): 'current', 'stale' (and STALE is
-    published on its head) or 'moot' (the PR closed or moved to another head, which has no check yet)."""
+    """For a PASS or NOT_REQUIRED (`done`: its bound fields): 'current', 'stale' (the issue's UAT, the spec
+    or the environment changed) or 'moot' (the PR closed or moved to another head)."""
     found = derive(ctx, done['pr'])
     if found['status'] == 'CLOSED' or found['sha'] != done['sha']:
         return 'moot'
-    if found.get('key') == done['key']:
-        return 'current'
-    publish(ctx, done, STALE, 'UAT result is stale',
-            f'What UAT tests for this pull request changed since this {done.get("verdict", "earlier")} result '
-            f'(issue, spec or environment); it no longer applies. Run `uat-test` for the current head.',
-            done.get('failed_rounds', 0), run_id=done.get('run_id'))
-    return 'stale'
+    return 'current' if found.get('key') == done['key'] else 'stale'

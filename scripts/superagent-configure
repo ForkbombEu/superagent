@@ -12,7 +12,7 @@ converges these fields, overwriting panel edits of the same fields:
 - Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
 - Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, the Claude
   Code review and squash-merge procedure, followed by delivery-uat.md, the user
-  acceptance tests procedure, when $SUPERAGENT_UAT_APP_ID is set
+  acceptance tests procedure, when $SUPERAGENT_UAT_ENABLED is true
 
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
 the loop re-reads settings after each save until nothing differs.
@@ -106,7 +106,8 @@ def changes(view, prompts, users, executor_env, delivery):
 def main():
     users, executor_env = allowed_users(), executor_settings()
     delivery = ''
-    for path in (DELIVERY, *([DELIVERY_UAT] if os.environ.get('SUPERAGENT_UAT_APP_ID') else [])):
+    uat = os.environ.get('SUPERAGENT_UAT_ENABLED') == 'true'
+    for path in (DELIVERY, *([DELIVERY_UAT] if uat else [])):
         with open(path, encoding='utf-8') as file:
             delivery += ('\n\n' if delivery else '') + file.read().strip()
     # Each block is saved at most once per run, so a value the API normalizes cannot loop.

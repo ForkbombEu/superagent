@@ -76,7 +76,7 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
 # Claude Code PR review: the read-only policy (managed settings take precedence over
 # user and repository settings) and the review prompt claude-review sends, and the
 # Delivery requirements that superagent-configure saves (delivery-uat.md only when
-# SUPERAGENT_UAT_APP_ID enables user acceptance tests).
+# SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
 

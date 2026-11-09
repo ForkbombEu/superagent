@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
-# The trusted UAT gate (build context: the repository root; compose.yaml service
-# uat-gate). It holds the UAT GitHub App key and the tester's DeepSeek key,
-# publishes superagent/uat and drives the runner (uat-runner) over TLS. It never
-# runs a pull request's code itself: that happens only in the runner's containers.
+# The UAT gate (build context: the repository root; compose.yaml service
+# uat-gate). It holds a GitHub read token and the tester's DeepSeek key, keeps
+# the UAT verdicts and drives the runner (uat-runner) over TLS. It never runs a
+# pull request's code itself: that happens only in the runner's containers.
 FROM docker:29-cli
 
 RUN set -eux; \
-    apk add --no-cache git openssl py3-yaml python3 su-exec; \
+    apk add --no-cache git py3-yaml python3 su-exec; \
     adduser -D -u 10020 gate; \
     install -d -o gate -g gate /var/lib/uat-gate /var/lib/uat-work
 

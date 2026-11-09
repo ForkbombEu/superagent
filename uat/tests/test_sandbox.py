@@ -134,7 +134,7 @@ class LocalSandboxTest(unittest.TestCase):
                   ds.TESTER_IMAGE, 'python3', '/m/mock_model.py', '8080', '/m/script.json')
         cls.environment = {**os.environ, 'DEEPSEEK_API_KEY': 'sk-uat-test-key',
                            'DEEPSEEK_BASE_URL': f'http://{cls.models}-mock:8080',
-                           'GH_TOKEN': 'ghp_controller_secret', 'SUPERAGENT_UAT_APP_PRIVATE_KEY': 'app-private-key'}
+                           'GH_TOKEN': 'ghp_controller_secret', 'SUPERAGENT_UAT_GITHUB_TOKEN': 'app-private-key'}
         cls.counter = 0
 
     @classmethod

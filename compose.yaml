@@ -33,13 +33,12 @@ services:
       # Optional Claude Code reviewer model and effort (scripts/claude-review).
       SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
-      # Optional user acceptance tests (README "User acceptance tests"): the numeric
-      # id of the UAT GitHub App turns them on. The worker only *requests* runs from
-      # uat-gate with the shared token; the App's private key never belongs here.
-      SUPERAGENT_UAT_APP_ID: ${SUPERAGENT_UAT_APP_ID:-}
+      # Optional user acceptance tests (README "User acceptance tests"): true adds
+      # the UAT step to the Delivery requirements and gives the worker uat-test,
+      # which only *requests* runs from uat-gate with the shared token.
+      SUPERAGENT_UAT_ENABLED: ${SUPERAGENT_UAT_ENABLED:-false}
       SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
       SUPERAGENT_UAT_GATE_URL: ${SUPERAGENT_UAT_GATE_URL:-http://uat-gate:8090}
-      SUPERAGENT_UAT_CHECK_NAME: ${SUPERAGENT_UAT_CHECK_NAME:-}
       # Coolify derives these from the dashboard's domain (declared below). They
       # are required at start by superagent-entrypoint.sh rather than with `:?`
       # here, so `docker compose build` does not depend on them.
@@ -73,10 +72,10 @@ services:
     expose:
       - "8080"
 
-  # The trusted UAT gate (uat/gate.py): takes run requests from superagent only,
-  # derives everything from GitHub, publishes superagent/uat through the UAT
-  # GitHub App and drives uat-runner. It runs no pull request code. Without
-  # SUPERAGENT_UAT_APP_ID and its key it answers 503 and does nothing.
+  # The UAT gate (uat/gate.py): takes run requests from superagent only, reads
+  # what each run is bound to from GitHub (read access only), drives uat-runner
+  # and keeps the verdicts. It runs no pull request code and writes nothing on
+  # GitHub. Without SUPERAGENT_UAT_GATE_TOKEN it answers 503 and does nothing.
   uat-gate:
     build:
       context: .
@@ -84,12 +83,11 @@ services:
     restart: unless-stopped
     environment:
       GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
-      SUPERAGENT_UAT_APP_ID: ${SUPERAGENT_UAT_APP_ID:-}
-      # PEM, newlines kept or written as \n; only this service ever gets it.
-      SUPERAGENT_UAT_APP_PRIVATE_KEY: ${SUPERAGENT_UAT_APP_PRIVATE_KEY:-}
-      SUPERAGENT_UAT_INSTALLATION_ID: ${SUPERAGENT_UAT_INSTALLATION_ID:-}
+      # GitHub read access for the PR, its issue and its code: the deployment's
+      # token, unless a separate read-only token is set. Never given to a container.
+      GH_TOKEN: ${GH_TOKEN:?}
+      SUPERAGENT_UAT_GITHUB_TOKEN: ${SUPERAGENT_UAT_GITHUB_TOKEN:-}
       SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
-      SUPERAGENT_UAT_CHECK_NAME: ${SUPERAGENT_UAT_CHECK_NAME:-}
       # The tester's model key, passed only to the tester container on the runner.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
       SUPERAGENT_UAT_MODEL: ${SUPERAGENT_UAT_MODEL:-}

@@ -29,7 +29,7 @@ import sys
 import urllib.parse
 
 from uat import result as results
-from uat import sandbox, spec
+from uat import preview, sandbox, spec
 from uat.github import GitHub, GitHubError
 
 CHECK_NAME = 'superagent/uat'
@@ -57,11 +57,17 @@ class Context:
         self.read = GitHub(environ.get('UAT_READ_TOKEN', ''), environ.get('GITHUB_API_URL'))
         self.checks = GitHub(environ.get('UAT_CHECK_TOKEN', ''), environ.get('GITHUB_API_URL'))
         self.app_id = int(environ.get('UAT_APP_ID') or 0)
-        self.environments = set(re.split(r'[\s,]+', environ.get('UAT_ENVIRONMENTS', 'local').strip())) - {''}
+        self.environments = set(re.split(r'[\s,]+', (environ.get('UAT_ENVIRONMENTS') or 'local').strip())) - {''}
         self.max_failed_rounds = int(environ.get('UAT_MAX_FAILED_ROUNDS') or 3)
         server = environ.get('GITHUB_SERVER_URL', 'https://github.com')
         self.run_url = f'{server}/{self.repository}/actions/runs/{environ.get("GITHUB_RUN_ID", "0")}'
         self.out_dir = environ.get('UAT_OUT_DIR') or os.path.join(environ.get('RUNNER_TEMP', '/tmp'), 'superagent-uat', 'out')
+        # Preview deployments: trusted workflow settings only (README, "Preview environment").
+        self.preview = {'url': environ.get('UAT_PREVIEW_URL', '').strip(),
+                        'allowed_hosts': environ.get('UAT_PREVIEW_ALLOWED_HOSTS', '').split(),
+                        'revision_path': environ.get('UAT_PREVIEW_REVISION_PATH', '').strip(),
+                        'ready_timeout': int(environ.get('UAT_PREVIEW_READY_TIMEOUT_SECONDS') or 300),
+                        'credentials': environ.get('UAT_PREVIEW_CREDENTIALS', '')}
 
     def event(self):
         with open(self.env['GITHUB_EVENT_PATH'], encoding='utf-8') as file:
@@ -141,6 +147,14 @@ def derive(ctx, number):
     if entry is None:
         return verdict(FAIL, f'environment {name!r} is not configured: add it to {sandbox.CONFIG_PATH} '
                              '(type local with start and ready)', issue=issue)
+    if entry['type'] == 'preview':
+        if not (ctx.preview['url'] and ctx.preview['allowed_hosts'] and ctx.preview['revision_path'].startswith('/')):
+            return verdict(BLOCKED, f'environment {name!r} is a preview, and this repository\'s superagent-uat workflow '
+                                    'configures no preview URL, allowed hosts and revision path', issue=issue)
+        try:
+            preview.preview_url(ctx.preview['url'], number, ctx.preview['allowed_hosts'])
+        except preview.Refused as error:
+            return verdict(BLOCKED, str(error), issue=issue)
     return verdict(spec.READY, '', issue=issue, environment=name, spec_sha256=spec.spec_hash(parsed, name),
                    spec=parsed, entry=entry, issue_updated_at=updated_at)
 
@@ -302,8 +316,12 @@ def test(ctx):
                                         allow=tuple(model_hosts(ctx.env)), tester_timeout=minutes * 60,
                                         proxy_networks=tuple(ctx.env.get('UAT_PROXY_NETWORKS', '').split()),
                                         environment=dict(ctx.env))
-            outcome = sandbox.run_local(snapshot['meta'], spec.from_canonical(snapshot['canonical']), checkout,
-                                        entry, settings, ctx.out_dir)
+            run_spec = spec.from_canonical(snapshot['canonical'])
+            if entry['type'] == 'preview':
+                outcome = preview.run_preview(snapshot['meta'], run_spec, entry, settings, ctx.preview, ctx.out_dir,
+                                              checkout)
+            else:
+                outcome = sandbox.run_local(snapshot['meta'], run_spec, checkout, entry, settings, ctx.out_dir)
     except Exception as error:  # Infrastructure, not the PR: blocked, never passed.
         outcome = results.Outcome(BLOCKED, [f'the UAT run failed: {type(error).__name__}: {error}'])
         log(f'test failed: {error!r}')
@@ -311,9 +329,19 @@ def test(ctx):
         with open(os.path.join(ctx.out_dir, 'outcome.json'), 'w', encoding='utf-8') as file:
             json.dump({'verdict': outcome.verdict, 'reasons': outcome.reasons, 'transient': outcome.transient,
                        'result': outcome.result}, file, indent=2)
-        redact_tree(ctx.out_dir, [ctx.env.get(name, '') for name in ('DEEPSEEK_API_KEY', 'UAT_READ_TOKEN')])
+        redact_tree(ctx.out_dir, [ctx.env.get(name, '') for name in ('DEEPSEEK_API_KEY', 'UAT_READ_TOKEN')]
+                    + credential_values(ctx.preview['credentials']))
         sandbox.prune(ctx.out_dir)
         log(f'{outcome.verdict}: {"; ".join(outcome.reasons)[:2000]}')
+
+
+def credential_values(raw):
+    """The values of the preview test credentials (a JSON object), for redaction."""
+    try:
+        values = json.loads(raw) if raw else {}
+    except ValueError:
+        return [raw]
+    return [value for value in values.values() if isinstance(value, str)] if isinstance(values, dict) else [raw]
 
 
 def model_hosts(environ):

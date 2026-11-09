@@ -39,7 +39,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(sandbox.environment_entry('local', config)['ready'], 'http://127.0.0.1:3000/health')
         self.assertEqual(sandbox.environment_name(None, config), 'local')
         self.assertEqual(sandbox.environment_name('preview', config), 'preview')
-        self.assertEqual(sandbox.environment_entry('preview', config), {'type': 'preview'})
+        self.assertEqual(sandbox.environment_entry('preview', config), {'type': 'preview', 'readiness_path': '/health'})
+        self.assertEqual(sandbox.environment_entry('preview', None), {'type': 'preview'})
         self.assertIsNone(sandbox.environment_entry('staging', config))
 
     def test_absent_config(self):

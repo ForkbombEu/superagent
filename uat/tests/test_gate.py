@@ -78,8 +78,8 @@ class Gate(unittest.TestCase):
             json.dump({'verdict': verdict, 'reasons': [], 'result': result}, file)
         return snapshot
 
-    def finish(self, outputs, test_result='success'):
-        ctx = self.context(UAT_SNAPSHOT=outputs['snapshot'], UAT_TEST_RESULT=test_result)
+    def finish(self, outputs, test_result='success', **extra):
+        ctx = self.context(UAT_SNAPSHOT=outputs['snapshot'], UAT_TEST_RESULT=test_result, **extra)
         controller.finish(ctx)
 
     def latest(self, sha):

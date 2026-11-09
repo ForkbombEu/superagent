@@ -2,7 +2,8 @@
 """Sample application under test: a tiny records API.
 
 POST /records {"name": "<non-empty>"} -> 201 {"id": n, "name": ...}; anything else -> 400.
-GET /records/<id> -> 200 record or 404. GET /health -> 200.
+GET /records/<id> -> 200 record or 404. GET /health -> 200. GET /revision -> $APP_REVISION
+(what a preview platform reports as the deployed commit).
 With UAT_FORCE_500=1 (or a file named force-500 next to this script), POST
 /records answers 500: the bug a UAT run must catch.
 """
@@ -30,6 +31,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             return self.answer(200, {'status': 'ok'})
+        if self.path == '/revision':
+            return self.answer(200, {'revision': os.environ.get('APP_REVISION', 'unknown')})
         if self.path.startswith('/records/') and self.path[9:].isdigit():
             record = RECORDS.get(int(self.path[9:]))
             return self.answer(200, record) if record else self.answer(404, {'error': 'not found'})
@@ -53,4 +56,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 3000), Handler).serve_forever()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
+    host = sys.argv[2] if len(sys.argv) > 2 else '127.0.0.1'
+    ThreadingHTTPServer((host, port), Handler).serve_forever()

@@ -38,14 +38,15 @@ def result_template(meta, scenario_ids):
     }
 
 
-def render_prompt(meta, spec, base_url, template_path=PROMPT):
+def render_prompt(meta, spec, base_url, template_path=PROMPT, kind='local', notes=''):
     """The tester's prompt; spec text sits between per-run random boundary lines it cannot forge."""
     boundary = f'=====UAT-SPEC-{secrets.token_hex(8)}====='
     ids = [scenario.id for scenario in spec.scenarios]
     values = {
         '<repository>': meta['repository'], '<pr>': str(meta['pr_number']), '<issue>': str(meta['issue_number']),
         '<sha>': meta['head_sha'], '<environment>': meta['environment'],
-        '<environment description>': ENVIRONMENTS[meta['environment']], '<base url>': base_url,
+        '<environment description>': ENVIRONMENTS[kind] + (f' {notes}' if notes else ''),
+        '<base url>': base_url,
         '<boundary>': boundary, '<preamble>': spec.preamble,
         '<scenarios>': '\n\n'.join(f'### {s.id}: {s.title}\n{s.steps}' for s in spec.scenarios),
         '<scenario ids>': ', '.join(ids),
@@ -65,8 +66,11 @@ def tester_command(name, image, network, work_dir, repo_dir, proxy, environment,
         # DSH loads native bindings it unpacks in /tmp: exec is required.
         '--pids-limit', '1024', '--memory', '4g', '--cpus', '2', '--tmpfs', '/tmp:rw,exec,size=1g',
         '-v', f'{work_dir}:/work', *(['-v', f'{repo_dir}:/repo:ro'] if repo_dir else []), *extra_mounts,
-        '-e', f'HTTPS_PROXY=http://{proxy}', '-e', f'HTTP_PROXY=http://{proxy}', '-e', 'NODE_USE_ENV_PROXY=1',
-        '-e', 'NO_PROXY=127.0.0.1,localhost', '-e', 'DSH_TELEMETRY_MODE=DISABLED', *passed,
+        # curl reads only the lowercase http_proxy; Node and others the uppercase forms.
+        *[item for name, value in (('HTTPS_PROXY', f'http://{proxy}'), ('HTTP_PROXY', f'http://{proxy}'),
+                                   ('NO_PROXY', '127.0.0.1,localhost'))
+          for item in ('-e', f'{name}={value}', '-e', f'{name.lower()}={value}')],
+        '-e', 'NODE_USE_ENV_PROXY=1', '-e', 'DSH_TELEMETRY_MODE=DISABLED', *passed,
         image, 'dsh', '--profile', 'superagent-uat', '--json', '-',
     ]
 
@@ -92,10 +96,10 @@ def attempt(command, name, prompt, timeout, out_dir, environment):
 
 
 def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo_dir=None, timeout=1800,
-        environment=None, name_prefix='superagent-uat', extra_mounts=()):
+        environment=None, name_prefix='superagent-uat', extra_mounts=(), kind='local', notes=''):
     """Test the spec, retrying a transient failure once; (Outcome, path of the work dir that produced it)."""
     environment = dict(os.environ if environment is None else environment)
-    prompt = render_prompt(meta, spec, base_url)
+    prompt = render_prompt(meta, spec, base_url, kind=kind, notes=notes)
     ids = [scenario.id for scenario in spec.scenarios]
     records = []
     for number in (1, 2):

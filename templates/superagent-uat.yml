@@ -3,7 +3,7 @@
 # Copy it to .github/workflows/superagent-uat.yml on the default branch and
 # replace each 0000000000000000000000000000000000000000 with the full commit
 # SHA of the superagent version to run. README.md, "User acceptance tests",
-# lists the GitHub App, environments and ruleset it needs.
+# lists the GitHub App, environments, variables and ruleset it needs.
 #
 # Workflows run from the default branch for these events, never from the pull
 # request; the pull request's code runs only inside the test job's sandbox.
@@ -24,6 +24,17 @@ permissions: {}
 concurrency:
   group: superagent-uat-${{ github.event.pull_request.number || github.event.client_payload.pr || format('issue-{0}', github.run_id) }}
   cancel-in-progress: false
+
+# The policy, the same for every job. Repository variables need admin rights
+# to change; the pull request and the issue cannot widen any of these.
+env:
+  UAT_ENVIRONMENTS: ${{ vars.SUPERAGENT_UAT_ENVIRONMENTS || 'local' }}
+  UAT_MAX_FAILED_ROUNDS: ${{ vars.SUPERAGENT_UAT_MAX_FAILED_ROUNDS || '3' }}
+  UAT_TESTER_TIMEOUT_MINUTES: ${{ vars.SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES || '30' }}
+  UAT_PREVIEW_URL: ${{ vars.SUPERAGENT_UAT_PREVIEW_URL }}
+  UAT_PREVIEW_ALLOWED_HOSTS: ${{ vars.SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS }}
+  UAT_PREVIEW_REVISION_PATH: ${{ vars.SUPERAGENT_UAT_PREVIEW_REVISION_PATH }}
+  UAT_PREVIEW_READY_TIMEOUT_SECONDS: ${{ vars.SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS || '300' }}
 
 jobs:
   start:
@@ -53,14 +64,14 @@ jobs:
           app-id: ${{ vars.SUPERAGENT_UAT_APP_ID }}
           check-token: ${{ steps.app.outputs.token }}
           read-token: ${{ github.token }}
-          environments: local
 
   test:
     needs: start
     if: needs.start.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    # Holds DEEPSEEK_API_KEY only; deployment branches: the default branch only.
+    # Holds DEEPSEEK_API_KEY (and UAT_PREVIEW_CREDENTIALS, if any); deployment
+    # branches: the default branch only. Never the App's private key.
     environment: superagent-uat-tester
     permissions:
       contents: read
@@ -69,6 +80,8 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           SUPERAGENT_UAT_MODEL: ${{ vars.SUPERAGENT_UAT_MODEL }}
+          # Optional JSON object of preview test credentials (values of 8+ characters).
+          UAT_PREVIEW_CREDENTIALS: ${{ secrets.UAT_PREVIEW_CREDENTIALS }}
         with:
           command: test
           app-id: ${{ vars.SUPERAGENT_UAT_APP_ID }}

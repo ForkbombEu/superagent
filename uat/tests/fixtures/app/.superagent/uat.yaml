@@ -7,3 +7,6 @@ environments:
     start: python3 server.py 3000
     ready: http://127.0.0.1:3000/health
     cleanup: echo cleaned > /uat-logs/cleanup.marker
+  preview:
+    type: preview
+    readiness_path: /health

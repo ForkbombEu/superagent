@@ -62,14 +62,17 @@ class DshTesterTest(unittest.TestCase):
         if os.path.exists(force):
             os.remove(force)
 
-    def result(self, verdict, uat1='PASS', uat2='PASS', observed2='HTTP 400, no record'):
+    def result(self, verdict, uat1='PASS', uat2='PASS', observed2='HTTP 400, no record', observed1='201, 200',
+               reproduction1=None):
         second = {'id': 'UAT-2', 'verdict': uat2, 'expected': 'HTTP 400 and no record', 'observed': observed2,
                   'evidence': ['artifacts/uat-2-invalid.txt']}
         if uat2 == 'FAIL':
             second['reproduction'] = [INVALID]
-        return json.dumps({'schema_version': 1, **self.meta, 'verdict': verdict, 'scenarios': [
-            {'id': 'UAT-1', 'verdict': uat1, 'expected': 'HTTP 201 and record retrievable', 'observed': '201, 200',
-             'evidence': ['artifacts/uat-1-create.txt', 'artifacts/uat-1-get.txt']}, second]})
+        first = {'id': 'UAT-1', 'verdict': uat1, 'expected': 'HTTP 201 and record retrievable', 'observed': observed1,
+                 'evidence': ['artifacts/uat-1-create.txt', 'artifacts/uat-1-get.txt']}
+        if reproduction1:
+            first['reproduction'] = reproduction1
+        return json.dumps({'schema_version': 1, **self.meta, 'verdict': verdict, 'scenarios': [first, second]})
 
     def run_script(self, steps, timeout=120):
         with open(self.script, 'w') as file:
@@ -96,15 +99,23 @@ class DshTesterTest(unittest.TestCase):
 
     def test_expected_fail_from_a_real_500(self):
         open(os.path.join(self.app_dir, 'force-500'), 'w').close()
-        outcome, work_dir, _ = self.run_script([{'bash': CREATE}, {'bash': INVALID},
-                                                {'final': self.result('FAIL', uat1='FAIL', observed2='HTTP 500')}])
+        outcome, work_dir, _ = self.run_script([{'bash': CREATE}, {'bash': INVALID}, {'final': self.result(
+            'FAIL', uat1='FAIL', observed1='HTTP 500 on create', observed2='HTTP 500')}])
         # UAT-1 says FAIL without reproduction steps: an unsupported failure is not trusted either.
         self.assertEqual(outcome.verdict, 'BLOCKED')
+        self.assertIn('UAT-1 fails without reproduction steps', outcome.reasons)
         with open(os.path.join(work_dir, 'artifacts', 'uat-1-create.txt')) as file:
             self.assertIn('500 Internal Server Error', file.read())
-        outcome, _, _ = self.run_script([{'bash': CREATE}, {'bash': INVALID},
-                                         {'final': self.result('FAIL', uat2='FAIL', observed2='HTTP 500')}])
+        outcome, _, _ = self.run_script([{'bash': CREATE}, {'bash': INVALID}, {'final': self.result(
+            'FAIL', uat1='FAIL', observed1='HTTP 500 on create', reproduction1=[CREATE], uat2='FAIL',
+            observed2='HTTP 500')}])
         self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
+
+    def test_evidence_must_come_from_the_application(self):
+        fabricated = 'echo "HTTP/1.1 201 Created" > artifacts/uat-1-create.txt; echo PASS > artifacts/uat-1-get.txt'
+        outcome, _, _ = self.run_script([{'bash': fabricated}, {'bash': INVALID}, {'final': self.result('PASS')}])
+        self.assertEqual(outcome.verdict, 'BLOCKED')
+        self.assertIn('UAT-1: none of its evidence comes from a command that reached the application', outcome.reasons)
 
     def test_hallucinated_pass_without_commands(self):
         outcome, _, _ = self.run_script([{'final': self.result('PASS')}])

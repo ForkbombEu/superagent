@@ -10,15 +10,19 @@ the gate through scripts/uat-test. For one requested run this module:
   blocked, budget used up) or a run;
 - execute: checks out the head and runs the sandbox and the DeepSeek tester on
   the isolated runner, then evaluates their output (uat.result);
-- conclude: re-derives the binding, so a new head, spec or environment makes
-  the result STALE, counts the failed round and writes the report;
-- revalidate: tells whether a PASS or NOT_REQUIRED still holds for the current
-  head, spec and environment.
+- conclude: re-derives the binding, so a new head, spec, environment, ticket
+  issue or policy makes the result STALE, counts the failed round and writes
+  the report.
+
+The binding key (derive) names the head, the issue the ticket started from,
+the spec, the environment and the policy fingerprint: the gate answers both
+"run" and "verify" with the latest complete run of exactly that key.
 
 Results are plain data (verdict, binding, title, summary, text) that the gate
 keeps and gives to uat-test; nothing here publishes to GitHub, so a trusted
 publisher can be added later without touching this module.
 """
+import hashlib
 import json
 import os
 import re
@@ -56,6 +60,14 @@ class Policy:
         self.tester_environment = {key: environ[key] for key in ('DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL',
                                                                   'SUPERAGENT_UAT_PROVIDER', 'SUPERAGENT_UAT_MODEL')
                                    if environ.get(key)}
+        # Part of every binding key: a change to what a run means (environments, preview deployment and
+        # credentials, model) makes earlier results no longer apply. Secrets enter only as a hash.
+        relevant = {'environments': sorted(self.environments),
+                    'preview': {**self.preview, 'allowed_hosts': sorted(self.preview['allowed_hosts']),
+                                'credentials': hashlib.sha256(self.preview['credentials'].encode()).hexdigest()},
+                    'model': [environ.get(key, '') for key in ('DEEPSEEK_BASE_URL', 'SUPERAGENT_UAT_PROVIDER',
+                                                               'SUPERAGENT_UAT_MODEL')]}
+        self.fingerprint = hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
 
 
 class Context:
@@ -72,30 +84,51 @@ def log(message):
 
 # Deriving what a PR must be tested against, from GitHub only.
 
-def derive(ctx, number):
-    """Everything the verdict is bound to, as a dict whose `status` is READY, NOT_REQUIRED, BLOCKED, FAIL or CLOSED."""
+def derive(ctx, number, origin=None):
+    """Everything the verdict is bound to, as a dict whose `status` is READY, NOT_REQUIRED, BLOCKED, FAIL or CLOSED.
+
+    `origin` is the issue the ticket started from (DSH_SUPERAGENT_GITHUB_NUMBER), which the PR description
+    cannot replace: it must be a real issue of the repository and the PR must close it. Its UAT is tested
+    with any other issue's the PR closes; `origin_checked` says it was verified as an issue."""
     gh, policy = ctx.github, ctx.policy
     pr = gh.get(f'repos/{ctx.repository}/pulls/{number}')
-    found = {'pr': number, 'sha': pr['head']['sha'], 'issue': None, 'environment': None, 'spec_sha256': None}
+    found = {'pr': number, 'sha': pr['head']['sha'], 'origin': origin, 'issue': None, 'environment': None,
+             'spec_sha256': None, 'origin_checked': False}
     if pr['state'] != 'open':
         return {**found, 'status': 'CLOSED', 'reason': 'the pull request is not open'}
     links = gh.graphql(LINKS, owner=ctx.owner, name=ctx.name, number=number)['repository']['pullRequest']
 
     def verdict(status, reason, **more):
         found.update(more)
-        found['key'] = f'{ctx.repository}/{number}/{found["sha"]}/{found["spec_sha256"] or status}/{found["environment"] or "-"}'
+        found['key'] = (f'{ctx.repository}/{number}/{found["sha"]}/#{origin or "-"}/{found["spec_sha256"] or status}/'
+                        f'{found["environment"] or "-"}/{policy.fingerprint}')
         return {**found, 'status': status, 'reason': reason}
 
     if (pr['head'].get('repo') or {}).get('full_name') != ctx.repository:
         return verdict(BLOCKED, 'pull requests from forks are not tested')
     issues = sorted(node['number'] for node in links['closingIssuesReferences']['nodes']
                     if node['repository']['nameWithOwner'].lower() == ctx.repository.lower())
+    bodies = {}
+    if origin is not None:
+        try:
+            bodies[origin] = gh.get(f'repos/{ctx.repository}/issues/{origin}')
+        except GitHubError as error:
+            if error.status != 404:
+                raise
+            return verdict(BLOCKED, f'issue #{origin}, which the ticket started from, does not exist in {ctx.repository}')
+        if bodies[origin].get('pull_request'):
+            return verdict(BLOCKED, f'#{origin}, which the ticket started from, is a pull request, not an issue')
+        found['origin_checked'] = True
+        if origin not in issues:
+            return verdict(FAIL, f'the pull request does not close issue #{origin}, which its ticket started from, so '
+                                 f'that issue\'s UAT would not run: name it with a `Closes #{origin}` line in its '
+                                 'description', issue=origin)
     if not issues:
         return verdict(FAIL, 'the pull request closes no issue of this repository: name the issue it resolves '
                              'with a `Closes #<n>` line in its description')
     specs = {}
     for issue in issues:
-        body = gh.get(f'repos/{ctx.repository}/issues/{issue}')
+        body = bodies.get(issue) or gh.get(f'repos/{ctx.repository}/issues/{issue}')
         specs[issue] = (spec.parse(body.get('body')), body.get('updated_at'))
     blocked = [(issue, parsed.reason) for issue, (parsed, _) in specs.items() if parsed.status == spec.BLOCKED]
     if blocked:
@@ -145,7 +178,7 @@ def clean(text, limit):
 
 
 def bound(found):
-    return {key: found.get(key) for key in ('pr', 'sha', 'issue', 'key', 'spec_sha256', 'environment')}
+    return {key: found.get(key) for key in ('pr', 'sha', 'origin', 'issue', 'key', 'spec_sha256', 'environment')}
 
 
 # One requested run.
@@ -307,7 +340,7 @@ def conclude(ctx, snapshot, outcome):
     if outcome.verdict not in (PASS, FAIL, BLOCKED, STALE):
         outcome = results.Outcome(BLOCKED, [f'unknown verdict {outcome.verdict!r}'])
     if outcome.verdict != STALE:
-        found = derive(ctx, snapshot['pr'])
+        found = derive(ctx, snapshot['pr'], snapshot.get('origin'))
         if found.get('key') != snapshot['key']:
             changes = [label for label, now, then in (('head', found['sha'], snapshot['sha']),
                                                       ('UAT spec', found.get('spec_sha256'), snapshot['spec_sha256']),
@@ -319,12 +352,3 @@ def conclude(ctx, snapshot, outcome):
     title, summary, text = report(snapshot, outcome, failed_rounds, ctx.policy.max_failed_rounds)
     log(f'run {snapshot["run_id"]} on {snapshot["sha"]}: {outcome.verdict}')
     return outcome.verdict, failed_rounds, clean(title, 255), clean(summary, 60000), clean(text, 60000)
-
-
-def revalidate(ctx, done):
-    """For a PASS or NOT_REQUIRED (`done`: its bound fields): 'current', 'stale' (the issue's UAT, the spec
-    or the environment changed) or 'moot' (the PR closed or moved to another head)."""
-    found = derive(ctx, done['pr'])
-    if found['status'] == 'CLOSED' or found['sha'] != done['sha']:
-        return 'moot'
-    return 'current' if found.get('key') == done['key'] else 'stale'

@@ -72,8 +72,8 @@ class Gate(unittest.TestCase):
         return gate.Gate(ctx, state or self.state, os.path.join(self.dir, 'work'),
                          executor=executor or fake_executor(self.verdicts))
 
-    def request(self, sha=None, pr=9, on=None):
-        return (on or self.gate).request(REPOSITORY, pr, sha or self.gh.prs[pr]['head']['sha'])
+    def request(self, sha=None, pr=9, on=None, issue=None):
+        return (on or self.gate).request(REPOSITORY, pr, sha or self.gh.prs[pr]['head']['sha'], issue)
 
     def drain(self, on=None):
         on = on or self.gate
@@ -88,8 +88,8 @@ class Gate(unittest.TestCase):
         self.drain()
         return self.gate.view(self.gate.one('SELECT * FROM runs WHERE id = ?', run['run_id']))
 
-    def current(self, sha, pr=9):
-        return self.gate.verify(REPOSITORY, pr, sha)['current']
+    def current(self, sha, pr=9, issue=None):
+        return self.gate.verify(REPOSITORY, pr, sha, issue)['current']
 
 
 class RunTest(Gate):
@@ -257,6 +257,82 @@ class InvalidationTest(Gate):
         self.assertTrue(self.current(SHA1))
 
 
+class BindingTest(Gate):
+    """The verdict is bound to the issue the ticket started from, and request and verify agree on the binding."""
+
+    def test_editing_closes_cannot_bypass_the_ticket_issue(self):
+        self.gh.add_issue(10, ISSUE)
+        self.gh.add_issue(20, 'Fix the typo.\n\n## Acceptance criteria\n- [ ] no typo\n')
+        self.gh.add_pr(11, SHA2, closes=[10])
+        self.verdicts[SHA2] = 'FAIL'
+        run = self.request(pr=11, issue=10)
+        self.drain()
+        self.assertEqual(self.gate.one('SELECT verdict FROM runs WHERE id = ?', run['run_id'])['verdict'], 'FAIL')
+        self.gh.prs[11]['closes'] = [20]  # `Closes #10` -> `Closes #20`: issue #20 has no UAT.
+        for issue in (10, None):  # The worker names its issue, or the gate uses the pinned one.
+            with self.subTest(issue=issue):
+                answer = self.request(pr=11, issue=issue)
+                self.assertEqual((answer['verdict'], answer['issue']), ('FAIL', 10))
+                self.assertIn('does not close issue #10', answer['summary'])
+                self.assertFalse(self.current(SHA2, pr=11, issue=issue))
+        with self.assertRaisesRegex(gate.Refused, 'bound to issue #10'):
+            self.request(pr=11, issue=20)
+        with self.assertRaisesRegex(gate.Refused, 'bound to issue #10'):
+            self.gate.verify(REPOSITORY, 11, SHA2, 20)
+        self.gh.prs[11]['closes'] = [10, 20]
+        self.assertEqual(self.request(pr=11)['verdict'], 'FAIL', "issue #10's UAT still runs and still fails")
+
+    def test_the_ticket_issue_must_be_an_issue_of_the_repository(self):
+        for issue, reason in ((999, 'does not exist'), (9, 'is a pull request')):
+            with self.subTest(issue=issue):
+                answer = self.request(issue=issue)
+                self.assertEqual(answer['verdict'], 'BLOCKED')
+                self.assertIn(reason, answer['summary'])
+        self.assertIsNone(self.gate.one('SELECT issue FROM origins'), 'nothing unverified is pinned')
+        self.assertEqual(self.run_to_end_for(issue=7)['verdict'], 'PASS')
+        self.assertTrue(self.current(SHA1, issue=7))
+        self.assertTrue(self.current(SHA1), 'the pinned issue applies when the request names none')
+
+    def run_to_end_for(self, issue):
+        run = self.request(issue=issue)
+        self.drain()
+        return self.gate.view(self.gate.one('SELECT * FROM runs WHERE id = ?', run['run_id']))
+
+    def test_request_and_verify_agree_after_a_spec_goes_a_b_a(self):
+        spec_a, spec_b = ISSUE, ISSUE.replace('returns 400', 'returns 422')
+        pass_a = self.run_to_end()
+        self.assertEqual(pass_a['verdict'], 'PASS')
+        self.gh.add_issue(7, spec_b)
+        self.verdicts[SHA1] = 'FAIL'
+        self.assertEqual(self.run_to_end()['verdict'], 'FAIL')
+        self.assertFalse(self.current(SHA1))
+        self.gh.add_issue(7, spec_a)
+        again = self.request()
+        self.assertEqual((again['run_id'], again['verdict']), (pass_a['run_id'], 'PASS'))
+        answer = self.gate.verify(REPOSITORY, 9, SHA1)
+        self.assertEqual((answer['current'], answer['run']['run_id']), (True, pass_a['run_id']))
+        self.assertEqual(self.gate.budget(REPOSITORY, 9), 1, 'the failed round B still counts')
+
+    def test_protected_policy_changes_invalidate_a_pass(self):
+        self.run_to_end()
+        preview = {'SUPERAGENT_UAT_ENVIRONMENTS': 'local preview', 'SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS': 'example.com',
+                   'SUPERAGENT_UAT_PREVIEW_REVISION_PATH': '/revision'}
+        for change in ({'SUPERAGENT_UAT_MODEL': 'deepseek-reasoner'},
+                       {**preview, 'SUPERAGENT_UAT_PREVIEW_URL': 'https://example.com'},
+                       {'SUPERAGENT_UAT_PREVIEW_CREDENTIALS': '{"UAT_PASSWORD": "another-long-secret"}'}):
+            with self.subTest(change=sorted(change)):
+                self.gate = self.make_gate(**change)
+                answer = self.gate.verify(REPOSITORY, 9, SHA1)
+                self.assertFalse(answer['current'])
+                self.assertIn('STALE', answer['reason'])
+        self.gate = self.make_gate(SUPERAGENT_UAT_MAX_FAILED_ROUNDS='5')
+        self.assertTrue(self.current(SHA1), 'limits are not part of what a result means')
+        self.gate = self.make_gate(SUPERAGENT_UAT_MODEL='deepseek-reasoner')
+        self.assertEqual(self.run_to_end()['verdict'], 'PASS')
+        self.assertTrue(self.current(SHA1))
+
+
+
 class SecurityTest(Gate):
     def test_github_credentials_leave_the_gate_environment(self):
         environ = {'GH_TOKEN': 'ghp_agent', 'SUPERAGENT_UAT_GITHUB_TOKEN': 'github_pat_read', 'GITHUB_TOKEN': 'x',
@@ -303,7 +379,8 @@ class HttpTest(Gate):
         self.environ = {**os.environ, 'UAT_TEST_GH': os.path.join(TESTS, 'fake_gh.py'), 'FAKE_GITHUB_URL': self.gh.url,
                         'FAKE_GITHUB_TOKEN': fg.CODER_TOKEN, 'UAT_TEST_CONFIG': self.config, 'HOME': self.dir,
                         'UAT_TEST_POLL_SECONDS': '0.1', 'UAT_TEST_TIMEOUT_SECONDS': '30', 'UAT_TEST_OUTAGE_SECONDS': '1',
-                        'PATH': f'{self.bin}:{os.environ["PATH"]}'}
+                        'PATH': f'{self.bin}:{os.environ["PATH"]}', 'DSH_SUPERAGENT_GITHUB_NUMBER': '',
+                        'DSH_SUPERAGENT_GITHUB_PR_HEAD': ''}
 
     def post(self, path, body, token=TOKEN):
         request = urllib.request.Request(self.url + path, data=json.dumps(body).encode(), method='POST',
@@ -322,9 +399,22 @@ class HttpTest(Gate):
         body = {'repository': REPOSITORY, 'pr': 9, 'head_sha': SHA1}
         self.assertEqual(self.post('/v1/uat/runs', {**body, 'verdict': 'PASS'})[0], 400)
         self.assertEqual(self.post('/v1/uat/runs', {**body, 'pr': '9'})[0], 400)
+        for issue in ('7', True, 0, -7):
+            self.assertEqual(self.post('/v1/uat/runs', {**body, 'issue': issue})[0], 400, issue)
         self.assertEqual(self.post('/v1/uat/runs', body, token='wrong')[0], 401)
         self.assertEqual(self.post('/v1/uat/runs', {**body, 'repository': 'evil/repo'})[0], 403)
         self.assertEqual(self.gate.query('SELECT * FROM runs'), [])
+
+    def test_uat_test_names_the_issue_the_ticket_started_from(self):
+        result = self.client(REPOSITORY, '9', SHA1, DSH_SUPERAGENT_GITHUB_NUMBER='7')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gate.one('SELECT issue FROM origins')['issue'], 7)
+        other = self.client('--verify', REPOSITORY, '9', SHA1, DSH_SUPERAGENT_GITHUB_NUMBER='8')
+        self.assertEqual(other.returncode, 3)
+        self.assertIn('bound to issue #7', other.stderr)
+        started_from_the_pr = self.client('--verify', REPOSITORY, '9', SHA1, DSH_SUPERAGENT_GITHUB_NUMBER='9',
+                                          DSH_SUPERAGENT_GITHUB_PR_HEAD='refs/pull/9/head')
+        self.assertEqual(started_from_the_pr.returncode, 0, started_from_the_pr.stderr)
 
     def test_only_allowed_clients(self):
         self.server.RequestHandlerClass = gate.handler(self.gate, TOKEN, ['192.0.2.1'])

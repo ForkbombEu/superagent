@@ -101,14 +101,74 @@ class CheckoutTest(unittest.TestCase):
         shutil.rmtree(root)
 
 
-def result(meta, verdict, uat2='PASS', observed2='HTTP 400, no record'):
+def git_commit(directory):
+    for command in (['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'fixture']):
+        subprocess.run(['git', *command], cwd=directory, check=True, capture_output=True)
+
+
+class TreeTest(unittest.TestCase):
+    """uat/sandbox/tree.py, which keeps a PASS about the committed source (here on the host, in the gate a container)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.pristine, self.work = os.path.join(self.root, 'pristine'), os.path.join(self.root, 'work')
+        os.makedirs(os.path.join(self.pristine, 'src'))
+        for path, text in (('server.py', 'print(1)\n'), ('src/app.py', 'app\n'), ('run.sh', 'echo\n')):
+            with open(os.path.join(self.pristine, path), 'w') as file:
+                file.write(text)
+        os.chmod(os.path.join(self.pristine, 'run.sh'), 0o755)
+        os.symlink('server.py', os.path.join(self.pristine, 'link'))
+        git_commit(self.pristine)
+        shutil.copytree(self.pristine, self.work, symlinks=True)
+
+    def tree(self, *args):
+        answer = subprocess.run([sys.executable, os.path.join(REPOSITORY, 'uat', 'sandbox', 'tree.py'), self.pristine,
+                                 self.work, *args], capture_output=True, text=True, check=True)
+        return json.loads(answer.stdout)
+
+    def test_untracked_output_is_not_a_change(self):
+        os.makedirs(os.path.join(self.work, 'node_modules', 'x'))
+        with open(os.path.join(self.work, 'build.out'), 'w') as file:
+            file.write('built')
+        self.assertEqual(self.tree(), {'changed': [], 'unrestored': []})
+
+    def test_tracked_changes_are_found_and_restored(self):
+        with open(os.path.join(self.work, 'server.py'), 'a') as file:
+            file.write('patched\n')
+        os.remove(os.path.join(self.work, 'run.sh'))
+        os.remove(os.path.join(self.work, 'link'))
+        os.symlink('/etc/passwd', os.path.join(self.work, 'link'))
+        shutil.rmtree(os.path.join(self.work, 'src'))
+        os.symlink('/etc', os.path.join(self.work, 'src'))
+        self.assertEqual(sorted(self.tree()['changed']), ['link', 'run.sh', 'server.py', 'src/app.py'])
+        self.assertEqual(self.tree('--restore')['unrestored'], [])
+        self.assertEqual(self.tree(), {'changed': [], 'unrestored': []})
+        self.assertEqual(os.readlink(os.path.join(self.work, 'link')), 'server.py')
+        self.assertTrue(os.access(os.path.join(self.work, 'run.sh'), os.X_OK))
+        self.assertFalse(os.path.islink(os.path.join(self.work, 'src')))
+
+    def test_exec_bit_is_part_of_the_source(self):
+        os.chmod(os.path.join(self.work, 'server.py'), 0o755)
+        self.assertEqual(self.tree()['changed'], ['server.py'])
+
+
+def result(meta, verdict, uat2='PASS', observed2='HTTP 400, no record', uat1='PASS', observed1='201, 200'):
     second = {'id': 'UAT-2', 'verdict': uat2, 'expected': 'HTTP 400 and no record', 'observed': observed2,
               'evidence': ['artifacts/uat-2-invalid.txt']}
     if uat2 == 'FAIL':
         second['reproduction'] = [INVALID]
-    return json.dumps({'schema_version': 1, **meta, 'verdict': verdict, 'scenarios': [
-        {'id': 'UAT-1', 'verdict': 'PASS', 'expected': 'HTTP 201 and record retrievable', 'observed': '201, 200',
-         'evidence': ['artifacts/uat-1-create.txt', 'artifacts/uat-1-get.txt', 'artifacts/app.log']}, second]})
+    first = {'id': 'UAT-1', 'verdict': uat1, 'expected': 'HTTP 201 and record retrievable', 'observed': observed1,
+             'evidence': ['artifacts/uat-1-create.txt', 'artifacts/uat-1-get.txt', 'artifacts/app.log']}
+    if uat1 == 'FAIL':
+        first['reproduction'] = [CREATE]
+    return json.dumps({'schema_version': 1, **meta, 'verdict': verdict, 'scenarios': [first, second]})
+
+
+def failing(pr):
+    """What the tester honestly reports of the application with force-500: every create answers 500."""
+    return result(meta(pr), 'FAIL', uat1='FAIL', observed1='HTTP 500 on create; the record is not retrievable',
+                  uat2='FAIL', observed2='HTTP 500')
 
 
 def meta(pr):
@@ -151,6 +211,7 @@ class LocalSandboxTest(unittest.TestCase):
                                 **overrides)
 
     def checkout(self, force_500=False, config=None):
+        """A committed copy of the sample application, as sandbox.checkout leaves it."""
         directory = tempfile.mkdtemp(dir=self.dir)
         shutil.copytree(FIXTURE, directory, dirs_exist_ok=True)
         if force_500:
@@ -158,6 +219,7 @@ class LocalSandboxTest(unittest.TestCase):
         if config:
             with open(os.path.join(directory, sandbox.CONFIG_PATH), 'w') as file:
                 file.write(config)
+        git_commit(directory)
         return directory
 
     def script(self, steps=None, by_pr=None):
@@ -183,7 +245,7 @@ class LocalSandboxTest(unittest.TestCase):
         checkout = self.checkout()
         outcome, out = self.run_local(checkout)
         self.assertEqual((outcome.verdict, outcome.reasons), ('PASS', []))
-        self.assertTrue(os.path.exists(os.path.join(checkout, 'setup.marker')))
+        self.assertFalse(os.path.exists(os.path.join(checkout, 'setup.marker')), 'setup runs on a copy')
         self.assertTrue(os.path.exists(os.path.join(out, 'app-logs', 'cleanup.marker')))
         with open(os.path.join(out, 'tester-work', 'attempt-1', 'artifacts', 'app.log')) as file:
             self.assertIn('POST /records -> 201', file.read())
@@ -192,7 +254,7 @@ class LocalSandboxTest(unittest.TestCase):
 
     def test_negative_scenario_against_a_real_500(self):
         steps = self.passing_steps()
-        steps[-1] = {'final': result(meta(9), 'FAIL', uat2='FAIL', observed2='HTTP 500')}
+        steps[-1] = {'final': failing(9)}
         self.script(steps)
         outcome, out = self.run_local(self.checkout(force_500=True))
         self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
@@ -236,9 +298,9 @@ class LocalSandboxTest(unittest.TestCase):
             self.assertIn('DENY CONNECT api.github.com:443', file.read())
 
     def test_simultaneous_pull_requests_stay_separate(self):
-        failing = self.passing_steps(10)
-        failing[-1] = {'final': result(meta(10), 'FAIL', uat2='FAIL', observed2='HTTP 500')}
-        self.script(by_pr={'9': self.passing_steps(9), '10': failing})
+        failing_steps = self.passing_steps(10)
+        failing_steps[-1] = {'final': failing(10)}
+        self.script(by_pr={'9': self.passing_steps(9), '10': failing_steps})
         outcomes = {}
         runs = {9: (self.checkout(), self.settings()), 10: (self.checkout(force_500=True), self.settings())}
 
@@ -251,6 +313,29 @@ class LocalSandboxTest(unittest.TestCase):
             thread.join()
         self.assertEqual(outcomes[9].verdict, 'PASS', outcomes[9].reasons)
         self.assertEqual(outcomes[10].verdict, 'FAIL', outcomes[10].reasons)
+
+    def test_setup_cannot_change_the_tested_source(self):
+        config = ('version: 1\nenvironments:\n  local:\n    type: local\n    setup: rm force-500 && echo built > build.out\n'
+                  '    start: python3 server.py 3000\n    ready: http://127.0.0.1:3000/health\n')
+        steps = self.passing_steps()
+        steps[-1] = {'final': failing(9)}
+        self.script(steps)
+        checkout = self.checkout(force_500=True, config=config)
+        outcome, out = self.run_local(checkout)
+        self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
+        with open(os.path.join(out, 'app-logs', 'app.log')) as file:
+            self.assertIn('POST /records -> 500', file.read(), 'the committed force-500 is what ran')
+        with open(os.path.join(out, 'setup.log')) as file:
+            self.assertRegex(file.read(), 'setup changed tracked files, restored to commit .*: force-500')
+        self.assertTrue(os.path.exists(os.path.join(checkout, 'force-500')))
+
+    def test_application_changing_tracked_files_cannot_pass(self):
+        config = ('version: 1\nenvironments:\n  local:\n    type: local\n'
+                  '    start: echo >> server.py && exec python3 server.py 3000\n    ready: http://127.0.0.1:3000/health\n')
+        self.script(self.passing_steps())
+        outcome, _ = self.run_local(self.checkout(config=config))
+        self.assertEqual(outcome.verdict, 'FAIL')
+        self.assertRegex(outcome.reasons[0], r'changed tracked files while it was tested \(server.py\)')
 
     def test_setup_failure_fails_with_its_log(self):
         config = ('version: 1\nenvironments:\n  local:\n    type: local\n    setup: echo dependency missing; exit 3\n'

@@ -9,14 +9,18 @@ from uat.tests.test_schema import RESULT
 
 META = {key: RESULT[key] for key in results.METADATA}
 IDS = ['UAT-1', 'UAT-2']
+ORIGIN = 'http://127.0.0.1:3000'
 PASSING = copy.deepcopy(RESULT)
 PASSING['verdict'] = 'PASS'
 PASSING['scenarios'][1].update(verdict='PASS', observed='HTTP 400; no record')
 PASSING['scenarios'][1].pop('reproduction')
+# The commands that captured RESULT's and PASSING's evidence, each naming its file and reaching the application.
+CAPTURE = (('bash', f'curl -sS -i -X POST {ORIGIN}/records | tee artifacts/uat-1-http.json', 'completed'),
+           ('bash', f"curl -sS -i -X POST -d '{{}}' {ORIGIN}/records | tee /work/artifacts/uat-2-http.json", 'completed'),
+           ('bash', 'cp /app-logs/app.log artifacts/server.log', 'completed'))
 
 
-def trace(final, *, calls=(('bash', 'curl -o artifacts/uat-1-http.json ...', 'completed'),), end='completed',
-          error_code=None, extra=()):
+def trace(final, *, calls=CAPTURE, end='completed', error_code=None, extra=()):
     events = [{'type': 'session', 'sessionId': 'session-1', 'cwd': '/work'},
               {'type': 'status', 'phase': 'turn_start', 'turn': 1}]
     for index, (tool, command, status) in enumerate(calls):
@@ -36,16 +40,21 @@ class EvaluateTest(unittest.TestCase):
     def setUp(self):
         self.work = tempfile.mkdtemp()
         os.makedirs(os.path.join(self.work, 'artifacts'))
-        for name in ('uat-1-http.json', 'uat-2-http.json', 'server.log'):
-            with open(os.path.join(self.work, 'artifacts', name), 'w') as file:
-                file.write('HTTP/1.1 201 Created\n')
+        for name, content in (('uat-1-http.json', 'HTTP/1.1 201 Created\r\n\r\n{"id": 1}'),
+                              ('uat-2-http.json', 'HTTP/1.1 400 Bad Request\r\n\r\n{"error": "name is required"}'),
+                              ('server.log', 'POST /records -> 201\n')):
+            self.write(name, content)
+
+    def write(self, name, content):
+        with open(os.path.join(self.work, 'artifacts', name), 'w') as file:
+            file.write(content)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.work)
 
     def evaluate(self, raw, exit_code=0, timed_out=False, ids=IDS):
-        return results.evaluate(raw, exit_code, timed_out, META, ids, self.work)
+        return results.evaluate(raw, exit_code, timed_out, META, ids, self.work, origins=[ORIGIN])
 
     def assertBlocked(self, outcome, reason):
         self.assertEqual(outcome.verdict, results.BLOCKED, outcome)
@@ -59,6 +68,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(self.evaluate(trace(f'```json\n{json.dumps(PASSING)}\n```')).verdict, 'PASS')
 
     def test_expected_fail(self):
+        self.write('uat-2-http.json', 'HTTP/1.1 500 Internal Server Error\r\n\r\n{}')
         outcome = self.evaluate(trace(RESULT))
         self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
         self.assertEqual(outcome.result['scenarios'][1]['observed'], 'HTTP 500')
@@ -145,8 +155,48 @@ class EvaluateTest(unittest.TestCase):
                            'executed no command')
 
     def test_hallucinated_pass_with_hand_written_evidence(self):
-        calls = (('bash', 'ls', 'completed'), ('write', '/work/artifacts/uat-1-http.json', 'completed'))
+        calls = (*CAPTURE, ('write', '/work/artifacts/uat-1-http.json', 'completed'))
         self.assertBlocked(self.evaluate(trace(PASSING, calls=calls)), 'written with a file tool')
+
+    def test_fabricated_evidence_that_never_reached_the_application(self):
+        calls = tuple(('bash', f'echo "HTTP/1.1 201 Created" > {path}', 'completed')
+                      for path in ('artifacts/uat-1-http.json', 'artifacts/uat-2-http.json', 'artifacts/server.log'))
+        outcome = self.evaluate(trace(PASSING, calls=calls))
+        self.assertBlocked(outcome, 'UAT-1: none of its evidence comes from a command that reached the application')
+        calls = (('bash', 'echo PASS > artifacts/uat-1-http.json', 'completed'), *CAPTURE[1:])
+        self.assertBlocked(self.evaluate(trace(PASSING, calls=calls)), 'UAT-1: none of its evidence')
+
+    def test_evidence_must_be_named_by_an_executed_command(self):
+        self.assertBlocked(self.evaluate(trace(PASSING, calls=CAPTURE[:1])),
+                           'UAT-2: artifacts/uat-2-http.json is named by no executed command')
+        failed = (CAPTURE[0], (*CAPTURE[1][:2], 'error'), CAPTURE[2])
+        self.assertBlocked(self.evaluate(trace(PASSING, calls=failed)), 'uat-2-http.json is named by no executed command')
+        renamed = (CAPTURE[0], ('bash', f'curl -i {ORIGIN}/records | tee artifacts/uat-2-http.json.bak', 'completed'),
+                   CAPTURE[2])
+        self.assertBlocked(self.evaluate(trace(PASSING, calls=renamed)), 'uat-2-http.json is named by no executed command')
+
+    def test_claimed_status_must_be_in_the_http_evidence(self):
+        self.write('uat-1-http.json', 'HTTP/1.1 500 Internal Server Error\r\n\r\n{}')
+        self.assertBlocked(self.evaluate(trace(PASSING)), 'UAT-1: observed names HTTP 201, but its evidence shows 500')
+        unrelated = copy.deepcopy(PASSING)  # UAT-2 cites UAT-1's response, which shows no 400.
+        unrelated['scenarios'][1]['evidence'] = ['artifacts/uat-1-http.json']
+        self.assertBlocked(self.evaluate(trace(unrelated)), 'UAT-2: observed names HTTP 400')
+
+    def test_browser_and_log_evidence_and_localhost_alias(self):
+        self.write('uat-1.png', '\x89PNG fake image bytes')
+        browser = copy.deepcopy(PASSING)
+        browser['scenarios'][0].update(observed='the record page lists the new record', evidence=['artifacts/uat-1.png'])
+        calls = (('bash', 'chromium --headless --screenshot=/work/artifacts/uat-1.png http://localhost:3000/records/1',
+                  'completed'), *CAPTURE[1:])
+        self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
+        elsewhere = (('bash', 'chromium --headless --screenshot=artifacts/uat-1.png https://example.com/', 'completed'),
+                     *CAPTURE[1:])
+        self.assertBlocked(self.evaluate(trace(browser, calls=elsewhere)), 'UAT-1: none of its evidence')
+
+    def test_status_like_numbers_that_are_not_status_codes(self):
+        timing = copy.deepcopy(PASSING)
+        timing['scenarios'][0]['observed'] = '201 in 350ms on port 3000 at 12:30:45; record id 1'
+        self.assertEqual(self.evaluate(trace(timing)).verdict, 'PASS')
 
     def test_overall_verdict_must_match_scenarios(self):
         lying = copy.deepcopy(RESULT)

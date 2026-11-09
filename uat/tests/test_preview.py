@@ -15,7 +15,8 @@ PREVIEW_ISSUE = ISSUE.replace('Environment: local', 'Environment: preview')
 
 
 class Preview(BaseHTTPRequestHandler):
-    revision, redirect = SHA, None
+    """A preview whose /revision answers `answers` in turn (the last one from then on)."""
+    answers, redirect = [json.dumps({'revision': SHA}).encode()], None
 
     def log_message(self, *args):
         pass
@@ -26,8 +27,11 @@ class Preview(BaseHTTPRequestHandler):
             self.send_header('location', self.redirect)
             self.end_headers()
             return
-        body = json.dumps({'revision': self.revision} if self.path == '/revision' else {'status': 'ok'}).encode()
-        self.send_response(200)
+        status, body = 200, b'{"status": "ok"}'
+        if self.path == '/revision':
+            body = self.answers[0] if len(self.answers) == 1 else type(self).answers.pop(0)
+            status, body = (int(body[5:8]), b'') if body.startswith(b'HTTP') else (200, body)
+        self.send_response(status)
         self.send_header('content-length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -63,9 +67,31 @@ class PolicyTest(unittest.TestCase):
         self.verify()
 
     def test_stale_preview_is_refused(self):
-        self.handler.revision = 'd' * 40
-        with self.assertRaisesRegex(preview.Refused, 'stale'):
+        self.handler.answers = [json.dumps({'revision': 'd' * 40}).encode()]
+        with self.assertRaisesRegex(preview.Refused, f'stale or not yet deployed.*|it runs {"d" * 40}'):
             self.verify()
+
+    def test_exact_revision_answers_are_accepted(self):
+        for answer in (SHA, SHA.upper() + '\n', json.dumps({'sha': SHA}), json.dumps({'commit': SHA, 'branch': 'agent/x'})):
+            with self.subTest(answer):
+                self.handler.answers = [answer.encode()]
+                self.verify()
+
+    def test_ambiguous_or_partial_revision_answers_are_refused(self):
+        for answer in (f'<html>deployed {SHA} after {"d" * 40}</html>', f'build {SHA}', SHA[:12],
+                       json.dumps({'revision': SHA, 'previous': 'd' * 40}), json.dumps({'revision': SHA, 'sha': SHA}),
+                       json.dumps({'version': SHA}), json.dumps({'revision': SHA[:7]}), json.dumps([SHA])):
+            with self.subTest(answer):
+                self.handler.answers = [answer.encode()]
+                with self.assertRaisesRegex(preview.Refused, 'does not prove the deployed commit'):
+                    self.verify()
+
+    def test_deployment_propagation_is_awaited(self):
+        self.handler.answers = [b'HTTP 503', json.dumps({'revision': 'd' * 40}).encode(), json.dumps({'revision': SHA}).encode()]
+        self.verify(timeout=10)
+        self.handler.answers = [b'HTTP 404']
+        with self.assertRaisesRegex(preview.Refused, 'HTTP 404.*stale or not yet deployed'):
+            self.verify(timeout=2)
 
     def test_redirect_to_a_disallowed_host_is_refused(self):
         self.handler.redirect = f'http://localhost:{self.server.server_port}/ready'

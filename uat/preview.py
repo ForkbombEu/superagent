@@ -10,16 +10,21 @@ Before the tester starts, the controller (outside every sandbox):
 - refuses a URL whose host is not allowed, and follows redirects only to
   allowed hosts;
 - waits for the readiness path to answer 2xx (unavailable: BLOCKED);
-- requires the revision path to answer with the full 40-character head SHA
-  (any other revision is a stale preview: BLOCKED). The deployment platform
-  supplies that revision, so a preview of older code cannot claim the head.
+- requires the revision path to name exactly the 40-character head SHA, as the
+  whole body or as the single revision field of a JSON object that names no
+  other commit; it is asked again until the deadline while the deployment
+  propagates, and an older revision then is a stale preview, an ambiguous
+  answer at once: BLOCKED either way. The deployment platform supplies that
+  revision, so a preview of older code cannot claim the head.
 The tester then reaches only the model API and the preview host through the
 allowlisting proxy, so a redirect elsewhere fails there too. Test credentials
 are a read-only file in the tester container and are redacted from every
-artifact and from the published check.
+kept file and report.
 """
+import http.client
 import json
 import os
+import re
 import shutil
 import time
 import urllib.error
@@ -78,8 +83,38 @@ def fetch(url, patterns, timeout=15):
         return error.code, error.read(MAX_BODY)
 
 
+SHA = re.compile(r'[0-9a-f]{40}')
+REVISION_FIELDS = ('revision', 'sha', 'commit', 'commit_sha', 'git_sha')
+
+
+def deployed_revision(body):
+    """The one full commit SHA a revision answer names: the whole body, or the single revision field of a
+    JSON object that names no other SHA. ValueError when it names none, or not unambiguously."""
+    text = body.decode('utf-8', 'replace').strip().lower()
+    if SHA.fullmatch(text):
+        return text
+    try:
+        document = json.loads(text)
+    except ValueError:
+        raise ValueError('it is neither a bare commit SHA nor a JSON object') from None
+    if not isinstance(document, dict):
+        raise ValueError('it is not a JSON object')
+    fields = [name for name in REVISION_FIELDS if name in document]
+    if len(fields) != 1:
+        raise ValueError(f'it needs exactly one of the fields {", ".join(REVISION_FIELDS)}, not {len(fields)}')
+    value = document[fields[0]]
+    if not isinstance(value, str) or not SHA.fullmatch(value):
+        raise ValueError(f'its {fields[0]} is not a full 40-character commit SHA')
+    if set(SHA.findall(text)) != {value}:
+        raise ValueError('it names more than one commit')
+    return value
+
+
 def verify(origin, sha, readiness_path, revision_path, patterns, timeout):
-    """Wait for the preview and prove it serves `sha`; raise Refused otherwise."""
+    """Wait for the preview and prove it serves exactly `sha`; raise Refused otherwise.
+
+    While the deployment propagates, the revision path may still answer an earlier commit or an error:
+    it is asked again until the deadline. An answer that names no commit unambiguously is refused at once."""
     deadline, problem = time.monotonic() + timeout, 'no answer'
     while time.monotonic() < deadline:
         try:
@@ -87,19 +122,29 @@ def verify(origin, sha, readiness_path, revision_path, patterns, timeout):
             if 200 <= status < 300:
                 break
             problem = f'HTTP {status}'
-        except (urllib.error.URLError, OSError) as error:
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
             problem = str(getattr(error, 'reason', error))
         time.sleep(3)
     else:
         raise Refused(f'the preview {origin + readiness_path} is unavailable ({problem}) after {timeout} s')
-    try:
-        status, body = fetch(origin + revision_path, patterns)
-    except (urllib.error.URLError, OSError) as error:
-        raise Refused(f'the preview revision {origin + revision_path} is unavailable: {error}') from None
-    text = body.decode('utf-8', 'replace').strip()
-    if status != 200 or sha not in text:
-        raise Refused(f'the preview at {origin} does not run {sha} (revision answer: HTTP {status} '
-                      f'{text[:80]!r}): it is stale or not yet deployed')
+    while True:
+        try:
+            status, body = fetch(origin + revision_path, patterns)
+            if status != 200:
+                problem = f'HTTP {status}'
+            else:
+                deployed = deployed_revision(body)
+                if deployed == sha:
+                    return
+                problem = f'it runs {deployed}'
+        except ValueError as error:
+            raise Refused(f'the preview revision {origin + revision_path} does not prove the deployed commit: '
+                          f'{error}') from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            problem = f'unavailable: {getattr(error, "reason", error)}'
+        if time.monotonic() >= deadline:
+            raise Refused(f'the preview at {origin} does not run {sha} ({problem}): it is stale or not yet deployed')
+        time.sleep(3)
 
 
 def credentials_file(raw, directory):

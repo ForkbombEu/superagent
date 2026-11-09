@@ -52,7 +52,10 @@ class FakeGitHub:
             pr = self.prs[int(parts[1])]
             return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': 'feat: x'}
         if method == 'GET' and parts[0] == 'issues':
-            return (200, self.issues[int(parts[1])]) if int(parts[1]) in self.issues else (404, {'message': 'Not Found'})
+            number = int(parts[1])
+            if number in self.prs:  # GitHub's issues API answers pull requests too, marked as such.
+                return 200, {'number': number, 'body': '', 'pull_request': {'url': f'{repo}pulls/{number}'}}
+            return (200, self.issues[number]) if number in self.issues else (404, {'message': 'Not Found'})
         if method == 'POST' and parts[0] == 'issues' and parts[2] == 'comments':
             self.comments.append({'pr': int(parts[1]), 'body': body['body'], 'token': token})
             return 201, {'id': len(self.comments)}

@@ -22,6 +22,9 @@ RUN set -eux; \
     rm "$asset"; \
     install -d -m 0777 /home/sandbox /workspace
 
+# Compares the working copy's tracked files with the committed snapshot (sandbox.py).
+COPY sandbox/tree.py /usr/local/lib/superagent-uat/tree.py
+
 # The controller runs the containers as its own uid; the home (a per-run volume
 # shared by setup and start) and the checkout are writable by any uid.
 ENV HOME=/home/sandbox \

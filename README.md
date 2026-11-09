@@ -312,10 +312,14 @@ title, every required CI check passed, no review requesting changes, and
   writes nothing on GitHub. Its API, on the internal network only, answers
   requests from the `superagent` service alone and with the shared
   `SUPERAGENT_UAT_GATE_TOKEN`. The token lets the worker ask, never decide: a
-  request names a repository, PR and head SHA and nothing else, and the gate
-  re-reads everything the run is bound to from GitHub (the PR head, the issue
-  its `Closes #<n>` names, the spec hash, `.superagent/uat.yaml`) and checks it
-  against its own policy. It runs no pull request code, and its GitHub token
+  request names a repository, PR and head SHA and, when the ticket started from
+  an issue, that issue (`uat-test` takes it from DSH's
+  `DSH_SUPERAGENT_GITHUB_NUMBER`), and nothing else. The gate pins that issue to
+  the PR on the first request and refuses another one later; the PR must close
+  it, so rewriting `Closes #<n>` cannot swap its UAT for another issue's. The
+  gate re-reads everything the run is bound to from GitHub (the PR head, the
+  issues its `Closes #<n>` lines name, the spec hash, `.superagent/uat.yaml`) and
+  checks it against its own policy. It runs no pull request code, and its GitHub token
   reaches no container: it is used for API reads and, through the environment
   of a single `git fetch`, for the checkout, and is redacted from kept files.
 - **`uat-runner`** is a Docker-in-Docker daemon, privileged as Docker in
@@ -328,7 +332,10 @@ title, every required CI check passed, no review requesting changes, and
   management API) or the dashboard.
 - **`superagent`** gets only the gate URL and the request token.
 
-Runs are keyed by repository, PR, head, spec hash and environment: a key that
+Runs are keyed by repository, PR, head, the ticket's issue, spec hash,
+environment and a fingerprint of the UAT policy (environments, preview URL,
+hosts, revision path, credentials, model), and `uat-test --verify` looks up
+exactly the key a new request would use: a key that
 passed, failed or needs no UAT is answered again rather than re-run, a newer
 head replaces an active run (which becomes `STALE`), and a run the gate lost
 in a restart is run again once, then `BLOCKED`. A PR gets three failing rounds
@@ -344,8 +351,11 @@ scenarios as data. A run passes only when DSH completed its turn, the final
 answer is a [result](uat/result.schema.json) that repeats the trusted
 metadata, covers exactly the spec's scenarios and cites evidence files that
 the tester's executed commands produced in a fresh directory
-([`uat/result.py`](uat/result.py)). Anything else (timeout, crash, malformed
-answer, missing evidence, a PASS without executed commands) is `BLOCKED`.
+([`uat/result.py`](uat/result.py)): every cited file named by a command that
+ran, at least one of each scenario's files captured from the application (its
+URL, or its log under `/app-logs/`), and every HTTP status the scenario reports
+present in its own cited responses. Anything else (timeout, crash, malformed
+answer, missing or unrelated evidence, a PASS without executed commands) is `BLOCKED`.
 DSH's own transient model errors are retried once.
 
 | Verdict | `uat-test` | Merge | Counts as a failing round |
@@ -354,7 +364,7 @@ DSH's own transient model errors are retried once.
 | `NOT_REQUIRED` | 0 | after a review pass, while it holds | no |
 | `FAIL` (a scenario fails, or the PR cannot be set up, started or configured) | 1 | no | yes |
 | `BLOCKED` (cannot run, invalid UAT section, environment not allowed, budget used up, runner or gate failure) | 2 | no | no |
-| `STALE` (head, spec or environment changed) | asks for a new run | no | no |
+| `STALE` (head, spec, environment, the ticket's issue or the UAT policy changed) | asks for a new run | no | no |
 
 Verdicts are plain records in the gate (verdict, exact head SHA, spec hash,
 environment, report), independent of how they reach GitHub; a trusted
@@ -368,7 +378,12 @@ from the repository's `.superagent/uat.yaml` ([schema](uat/config.schema.json)):
 `mise install` and `setup` run with network access, then `start` runs on an
 internal network whose only exit is an [allowlisting proxy](uat/proxy.py)
 that admits the model API alone; the tester shares the application's network
-namespace, so `ready: http://127.0.0.1:<port>/…` works for both. Containers
+namespace, so `ready: http://127.0.0.1:<port>/…` works for both. Setup and the
+application run in a writable copy of the checkout: after setup, any tracked
+file it changed is put back as committed (and listed in `setup.log`), while
+untracked output such as dependencies and builds stays; a tracked file changed
+while the application was tested turns a pass into `FAIL`. The tester reads the
+untouched checkout. Containers
 are removed after the run, when a newer head replaces it, and on gate
 restarts. The application must run entirely inside its container (no Docker,
 no outside services at run time).
@@ -382,7 +397,11 @@ template, `{pr}` for the PR number), `SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS`
 a path the deployment answers with the commit it runs; add `preview` to
 `SUPERAGENT_UAT_ENVIRONMENTS`. Before testing, the gate requires the readiness
 path (`readiness_path` in `.superagent/uat.yaml`, default `/`) to answer and the
-revision path to contain the full head SHA; a stale, unavailable or disallowed
+revision path to name exactly the head SHA: the whole body, or the one
+`revision`, `sha`, `commit`, `commit_sha` or `git_sha` field of a JSON object
+naming no other commit. An older commit or an error is asked again until
+`SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS` while the deployment
+propagates; a stale, ambiguous, unavailable or disallowed
 preview, or a redirect off the allowed hosts, is `BLOCKED`. The tester reaches
 only the model API and the preview host. Optional test credentials
 (`SUPERAGENT_UAT_PREVIEW_CREDENTIALS`, a JSON object of values of 8+

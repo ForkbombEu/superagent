@@ -57,6 +57,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_pr ON runs (repository, pr)
 CREATE INDEX IF NOT EXISTS runs_by_key ON runs (key, created);
 CREATE TABLE IF NOT EXISTS budgets (
   repository TEXT NOT NULL, pr INTEGER NOT NULL, failed_rounds INTEGER NOT NULL, PRIMARY KEY (repository, pr));
+CREATE TABLE IF NOT EXISTS origins (
+  repository TEXT NOT NULL, pr INTEGER NOT NULL, issue INTEGER NOT NULL, PRIMARY KEY (repository, pr));
 '''
 
 
@@ -132,12 +134,24 @@ class Gate:
                 raise Refused(429, f'more than {RATE_LIMIT} requests for PR #{pr} in {RATE_WINDOW // 60} minutes')
             recent.append(now)
 
-    def request(self, repository, pr, head_sha):
+    def binding(self, repository, pr, issue):
+        """The PR's current binding (controller.derive) for the issue its ticket started from: the one pinned
+        for the PR, which the first verified request names and no later request can change."""
+        row = self.one('SELECT issue FROM origins WHERE repository = ? AND pr = ?', repository, pr)
+        if row and issue is not None and issue != row['issue']:
+            raise Refused(409, f'PR #{pr} is bound to issue #{row["issue"]}, which its ticket started from, not #{issue}')
+        origin = row['issue'] if row else issue
+        found = controller.derive(self.ctx, pr, origin)
+        if not row and found['origin_checked']:
+            self.query('INSERT INTO origins VALUES (?, ?, ?)', repository, pr, origin)
+        return found
+
+    def request(self, repository, pr, head_sha, issue=None):
         """The run for this PR head: the same key's when it already has an answer, else a new one."""
         self.allowed(repository, pr, head_sha)
         ctx = self.ctx
         with self.pr_locks[(repository, pr)]:
-            found = controller.derive(ctx, pr)
+            found = self.binding(repository, pr, issue)
             if found['status'] == 'CLOSED':
                 raise Refused(409, 'the pull request is not open')
             if found['sha'] != head_sha:
@@ -174,29 +188,29 @@ class Gate:
         if self.finish_run(active['id'], controller.STALE, active['failed_rounds'], title, summary, '', active['state']):
             sandbox.remove(f'superagent-uat-{active["id"]}')
 
-    def verify(self, repository, pr, head_sha):
-        """Before merging: does a PASS or NOT_REQUIRED for this head still hold under the current issue and policy?"""
+    def verify(self, repository, pr, head_sha, issue=None):
+        """Before merging: is the answer for the current binding (the key `request` would use now) a PASS or
+        NOT_REQUIRED? A result for another issue, spec, environment or policy does not count."""
         self.allowed(repository, pr, head_sha)
         with self.pr_locks[(repository, pr)]:
-            row = self.one('SELECT * FROM runs WHERE repository = ? AND pr = ? AND head_sha = ? AND state = ? '
-                           'ORDER BY created DESC LIMIT 1', repository, pr, head_sha, COMPLETE)
-            if not row or row['verdict'] not in (controller.PASS, controller.NOT_REQUIRED):
-                return {'current': False, 'reason': 'no passing UAT result for this head', 'run': row and self.view(row)}
-            state = controller.revalidate(self.ctx, self.done(row))
-            if state != 'current':
-                self.query('UPDATE runs SET verdict = ?, updated = ? WHERE id = ?',
-                           controller.STALE if state == 'stale' else row['verdict'], time.time(), row['id'])
-                return {'current': False, 'reason': 'the PR head moved or closed' if state == 'moot' else
-                        'the issue\'s UAT or the environment changed since this result; it is now STALE',
+            found = self.binding(repository, pr, issue)
+            if found['status'] == 'CLOSED' or found['sha'] != head_sha:
+                return {'current': False, 'run': None, 'reason': 'the pull request is not open'
+                        if found['status'] == 'CLOSED' else f'the PR head moved to {found["sha"]}'}
+            row = self.one('SELECT * FROM runs WHERE key = ? AND state = ? ORDER BY created DESC LIMIT 1',
+                           found['key'], COMPLETE)
+            if row and row['verdict'] in (controller.PASS, controller.NOT_REQUIRED):
+                return {'current': True, 'reason': 'the result holds for the current head, issue, spec and policy',
                         'run': self.view(row)}
-            return {'current': True, 'reason': 'the result holds for the current head, issue and policy',
-                    'run': self.view(row)}
-
-    @staticmethod
-    def done(row):
-        return {'pr': row['pr'], 'sha': row['head_sha'], 'issue': row['issue'], 'key': row['key'],
-                'spec_sha256': row['spec_sha256'], 'environment': row['environment'], 'verdict': row['verdict'],
-                'failed_rounds': row['failed_rounds'], 'run_id': row['id']}
+            if row:
+                return {'current': False, 'reason': f'the result for the current binding is {row["verdict"]}',
+                        'run': self.view(row)}
+            earlier = self.one('SELECT * FROM runs WHERE repository = ? AND pr = ? AND head_sha = ? AND state = ? '
+                               'ORDER BY created DESC LIMIT 1', repository, pr, head_sha, COMPLETE)
+            return {'current': False, 'run': earlier and self.view(earlier),
+                    'reason': 'no UAT result for the current binding' + (
+                        ': the issue, its UAT, the environment or the UAT policy changed since the last result for '
+                        'this head, which is STALE for it' if earlier else '')}
 
     def artifact(self, run_id, path):
         root = os.path.realpath(os.path.join(self.state_dir, 'runs', run_id))
@@ -351,13 +365,17 @@ def handler(gate, token, clients):
                 data = json.loads(self.rfile.read(length) or b'null')
             except ValueError:
                 raise Refused(400, 'the body is not JSON') from None
-            if not isinstance(data, dict) or set(data) != {'repository', 'pr', 'head_sha'}:
-                raise Refused(400, 'the body is exactly {"repository", "pr", "head_sha"}: a request, never a verdict')
-            repository, pr, sha = data['repository'], data['pr'], data['head_sha']
+            if not isinstance(data, dict) or not {'repository', 'pr', 'head_sha'} <= set(data) <= {
+                    'repository', 'pr', 'head_sha', 'issue'}:
+                raise Refused(400, 'the body is exactly {"repository", "pr", "head_sha"} and, for a ticket started '
+                                   'from an issue, "issue": a request, never a verdict')
+            repository, pr, sha, issue = data['repository'], data['pr'], data['head_sha'], data.get('issue')
             if not (isinstance(repository, str) and isinstance(pr, int) and not isinstance(pr, bool) and pr > 0
-                    and isinstance(sha, str) and len(sha) == 40 and all(c in '0123456789abcdef' for c in sha)):
-                raise Refused(400, 'repository must be owner/repo, pr a number and head_sha a full 40-character SHA')
-            return repository, pr, sha
+                    and isinstance(sha, str) and len(sha) == 40 and all(c in '0123456789abcdef' for c in sha)
+                    and (issue is None or isinstance(issue, int) and not isinstance(issue, bool) and issue > 0)):
+                raise Refused(400, 'repository must be owner/repo, pr and issue numbers and head_sha a full '
+                                   '40-character SHA')
+            return repository, pr, sha, issue
 
         def do_GET(self):
             if self.path == '/healthz':

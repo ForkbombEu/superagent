@@ -149,11 +149,31 @@ def start_proxy(settings, extra_allow=()):
         docker('network', 'connect', network, f'{p}-proxy')
 
 
+def check_tree(settings, checkout, workspace, restore):
+    """Compare the working copy's tracked files with the commit, in a throwaway container without network;
+    restore them when asked. {"changed": [...], "unrestored": [...]}."""
+    answer = docker('run', '--rm', '--network', 'none', '--user', f'{os.getuid()}:{os.getgid()}', *LIMITS,
+                    '-v', f'{checkout}:/pristine:ro', '-v', f'{workspace}:/workspace{"" if restore else ":ro"}',
+                    '--entrypoint', 'python3', settings.sandbox_image, '/usr/local/lib/superagent-uat/tree.py',
+                    '/pristine', '/workspace', *(['--restore'] if restore else []), timeout=600)
+    return json.loads(answer.stdout)
+
+
+def listed(paths, limit=10):
+    return ', '.join(paths[:limit]) + (f' and {len(paths) - limit} more' if len(paths) > limit else '')
+
+
 def run_local(meta, spec, checkout, entry, settings, out_dir):
-    """The Outcome of testing the checkout's local environment `entry`; artifacts stay in out_dir."""
+    """The Outcome of testing the checkout's local environment `entry`; artifacts stay in out_dir.
+
+    The checkout stays exactly the commit: setup and the application run in a writable copy of it, whose
+    tracked files are restored to the commit after setup (dependency and build output, untracked, stay) and
+    compared with it after the test, so a PASS always describes the committed source."""
     p, environment = settings.prefix, dict(os.environ if settings.environment is None else settings.environment)
     user = ['--user', f'{os.getuid()}:{os.getgid()}']
-    mounts = ['-v', f'{checkout}:/workspace', '-v', f'{p}-home:/home/sandbox']
+    workspace = checkout.rstrip('/') + '.workspace'
+    shutil.copytree(checkout, workspace, symlinks=True)
+    mounts = ['-v', f'{workspace}:/workspace', '-v', f'{p}-home:/home/sandbox']
     logs = os.path.join(out_dir, 'app-logs')
     os.makedirs(logs)
     os.chmod(logs, 0o777)
@@ -170,6 +190,14 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
             reason = f'did not finish within {settings.setup_timeout} s' if timed_out else f'exited with status {code}'
             return results.Outcome(results.FAIL, [f'the sandbox setup ({entry.get("setup") or "mise install"}) {reason}; '
                                                   f'last output:\n{tail(setup_log)}'])
+        tree = check_tree(settings, checkout, workspace, restore=True)
+        if tree['changed']:
+            with open(setup_log, 'a', encoding='utf-8') as log:
+                log.write(f'\nsuperagent-uat: setup changed tracked files, restored to commit {meta["head_sha"]}: '
+                          f'{listed(tree["changed"])}\n')
+        if tree['unrestored']:
+            return results.Outcome(results.FAIL, [f'the sandbox setup changed tracked files that could not be restored '
+                                                  f'to commit {meta["head_sha"]}: {listed(tree["unrestored"])}'])
         start_proxy(settings)
         docker('run', '-d', '--name', f'{p}-pod', '--network', f'{p}-internal', *user, *LIMITS,
                settings.sandbox_image, 'sleep', 'infinity')
@@ -185,6 +213,11 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
                              out_dir=os.path.join(out_dir, 'tester'), base_url=f'http://{url.netloc}',
                              repo_dir=checkout, timeout=settings.tester_timeout, environment=environment,
                              name_prefix=p, extra_mounts=['-v', f'{logs}:/app-logs:ro'])
+        changed = check_tree(settings, checkout, workspace, restore=False)['changed']
+        if changed and outcome.verdict == results.PASS:
+            outcome = results.Outcome(results.FAIL, [
+                f'the application changed tracked files while it was tested ({listed(changed)}), so the result does '
+                f'not describe commit {meta["head_sha"]}'], result=outcome.result, tool_calls=outcome.tool_calls)
         if entry.get('cleanup'):
             # Best effort: the containers, networks and volume go away regardless.
             with open(os.path.join(out_dir, 'cleanup.log'), 'wb') as log:
@@ -196,6 +229,7 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
         return outcome
     finally:
         remove(p, out_dir)
+        run.remove_tree(workspace, settings.sandbox_image)
 
 
 def remove(prefix, out_dir=None):

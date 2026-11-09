@@ -112,7 +112,7 @@ def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo
         name = f'{name_prefix}-tester-{number}'
         command = tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts)
         raw, exit_code, timed_out, started, finished = attempt(command, name, prompt, timeout, attempt_out, environment)
-        outcome = results.evaluate(raw, exit_code, timed_out, meta, ids, work_dir)
+        outcome = results.evaluate(raw, exit_code, timed_out, meta, ids, work_dir, origins=[base_url])
         records.append({'attempt': number, 'started_at': started, 'finished_at': finished, 'exit_code': exit_code,
                         'timed_out': timed_out, 'tool_calls': outcome.tool_calls, 'verdict': outcome.verdict,
                         'reasons': outcome.reasons, 'transient': outcome.transient})

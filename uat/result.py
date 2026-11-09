@@ -15,6 +15,7 @@ import json
 import os
 import re
 import stat
+import urllib.parse
 from dataclasses import dataclass, field
 
 from uat import schema
@@ -29,6 +30,10 @@ FILE_WRITE_TOOLS = {'write', 'edit'}
 TRANSIENT_CODES = {'EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'}
 MAX_TRACE_BYTES = 64 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 25 * 1024 * 1024
+# Where an application observation can come from besides its URL: the local application's console log.
+APP_LOGS = '/app-logs/'
+HTTP_STATUS_LINE = re.compile(rb'^HTTP/[0-9.]+ ([1-5][0-9]{2})\b', re.MULTILINE)
+NUMBER = re.compile(r'(?<![\w.:/-])([1-5][0-9]{2})(?![\w.:/-])')
 METADATA = ('repository', 'issue_number', 'pr_number', 'head_sha', 'uat_spec_sha256', 'environment',
             'environment_revision')
 
@@ -120,8 +125,46 @@ def evidence_problem(path, work_dir, hand_written):
     return None
 
 
-def evaluate(raw_trace, exit_code, timed_out, expected, scenario_ids, work_dir):
-    """The Outcome of one run; `expected` holds the controller's own METADATA values."""
+def application_needles(origins):
+    """The strings by which a command addresses the application: host:port of each origin (127.0.0.1 and
+    localhost alike), the bare host when the port is the scheme's default, and its log directory."""
+    needles = {APP_LOGS}
+    for origin in origins:
+        url = urllib.parse.urlsplit(origin)
+        hosts = {url.hostname, *(('127.0.0.1', 'localhost') if url.hostname in ('127.0.0.1', 'localhost') else ())}
+        needles |= {f'{host}:{url.port}' if url.port else host for host in hosts}
+    return needles
+
+
+def provenance_problems(scenario, commands, needles, work_dir):
+    """Why a PASS or FAIL scenario's evidence does not show it was observed on the application, if it does not.
+
+    Each cited file must be named by an executed shell command, at least one of them by a command that
+    addressed the application, and the HTTP status codes `observed` names must be in the cited responses."""
+    problems, from_application, statuses = [], False, set()
+    for path in scenario['evidence']:
+        named = re.compile(re.escape(path) + r'(?![A-Za-z0-9._/-])')
+        producers = [command for command in commands if named.search(command)]
+        if not producers:
+            problems.append(f'{path} is named by no executed command')
+        from_application |= any(needle in command for command in producers for needle in needles)
+        try:
+            with open(os.path.join(work_dir, path), 'rb') as file:
+                statuses |= {int(code) for code in HTTP_STATUS_LINE.findall(file.read(MAX_EVIDENCE_BYTES))}
+        except OSError:
+            pass  # evidence_problem reports it.
+    if scenario['evidence'] and not from_application:
+        problems.append('none of its evidence comes from a command that reached the application')
+    claimed = {int(code) for code in NUMBER.findall(scenario['observed'])}
+    if statuses and claimed - statuses:
+        problems.append(f'observed names HTTP {", ".join(map(str, sorted(claimed - statuses)))}, but its evidence '
+                        f'shows {", ".join(map(str, sorted(statuses)))}')
+    return problems
+
+
+def evaluate(raw_trace, exit_code, timed_out, expected, scenario_ids, work_dir, origins):
+    """The Outcome of one run; `expected` holds the controller's own METADATA values and `origins` the
+    application's base URLs."""
     try:
         events = read_trace(raw_trace)
     except (ValueError, UnicodeDecodeError) as error:
@@ -153,10 +196,13 @@ def evaluate(raw_trace, exit_code, timed_out, expected, scenario_ids, work_dir):
     derived = FAIL if FAIL in verdicts else BLOCKED if BLOCKED in verdicts else PASS
     if result['verdict'] != derived:
         reasons.append(f'overall verdict {result["verdict"]} contradicts the scenario verdicts ({derived})')
-    if not any(tool in SHELL_TOOLS and status == 'completed' for tool, _, status in calls):
+    commands = [arguments.get('command', '') if isinstance(arguments, dict) else json.dumps(arguments)
+                for tool, arguments, status in calls if tool in SHELL_TOOLS and status == 'completed']
+    if not commands:
         reasons.append('the tester executed no command')
     hand_written = {path for tool, arguments, _ in calls if tool in FILE_WRITE_TOOLS
                     for path in re.findall(r'artifacts/[A-Za-z0-9._/-]+', json.dumps(arguments))}
+    needles = application_needles(origins)
     for scenario in result['scenarios']:
         if scenario['verdict'] == BLOCKED:
             continue
@@ -168,6 +214,7 @@ def evaluate(raw_trace, exit_code, timed_out, expected, scenario_ids, work_dir):
                 reasons.append(f'{scenario["id"]}: {problem}')
         if scenario['verdict'] == FAIL and not scenario.get('reproduction'):
             reasons.append(f'{scenario["id"]} fails without reproduction steps')
+        reasons += [f'{scenario["id"]}: {problem}' for problem in provenance_problems(scenario, commands, needles, work_dir)]
     if not reasons:
         outcome.verdict = derived
         if derived == BLOCKED:

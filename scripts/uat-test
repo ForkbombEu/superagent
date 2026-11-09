@@ -15,6 +15,11 @@ the request, and accepts a result only when the gate's record is for exactly
 <head sha> and, for a pass, still holds for the PR's current head and its
 issue's current UAT spec.
 
+When the ticket started from a GitHub issue (DSH_SUPERAGENT_GITHUB_NUMBER,
+set by DSH Superagent, without DSH_SUPERAGENT_GITHUB_PR_HEAD), the request
+names that issue: the gate pins it to the PR and requires the PR to close
+it, so editing the PR's `Closes #<n>` line cannot swap its UAT for another.
+
 The report (verdict, failing scenarios with expected, observed and
 reproduction, the run id for --artifact) is printed, kept under
 ~/.local/state/uat-test and posted on the PR as a comment, as the record of
@@ -89,8 +94,16 @@ def gh(*args, stdin=None):
     return subprocess.run([GH, *args], input=stdin, capture_output=True, text=True)
 
 
+def body(repository, number, sha):
+    request = {'repository': repository, 'pr': int(number), 'head_sha': sha}
+    origin = os.environ.get('DSH_SUPERAGENT_GITHUB_NUMBER', '').strip()
+    if origin.isdigit() and not os.environ.get('DSH_SUPERAGENT_GITHUB_PR_HEAD', '').strip():
+        request['issue'] = int(origin)
+    return request
+
+
 def verify(repository, number, sha):
-    status, answer = gate('POST', '/v1/uat/verify', {'repository': repository, 'pr': int(number), 'head_sha': sha})
+    status, answer = gate('POST', '/v1/uat/verify', body(repository, number, sha))
     if status != 200:
         fail(f'the UAT gate refused the check (HTTP {status}): {answer.get("error")}')
     return answer
@@ -100,7 +113,7 @@ def wait(repository, number, sha):
     """The completed gate run for the head, requesting it again when it went stale."""
     started, stale = time.monotonic(), 0
     while True:
-        status, run = gate('POST', '/v1/uat/runs', {'repository': repository, 'pr': int(number), 'head_sha': sha})
+        status, run = gate('POST', '/v1/uat/runs', body(repository, number, sha))
         if status != 200:
             fail(f'the UAT gate refused the request (HTTP {status}): {run.get("error")}')
         print(f'uat-test: UAT run {run["run_id"]} for {sha} is {run["state"].lower()}', flush=True)

@@ -14,12 +14,14 @@ class GitHubError(Exception):
 
 class GitHub:
     def __init__(self, token, api=None):
+        """`token` is a string, or a callable returning the current one (an App installation token)."""
         self.token = token
         self.api = (api or os.environ.get('GITHUB_API_URL') or 'https://api.github.com').rstrip('/')
 
     def request(self, method, path, body=None, params=None, raw=False):
         url = f'{self.api}/{path.lstrip("/")}' + (f'?{urllib.parse.urlencode(params)}' if params else '')
-        headers = {'Authorization': f'Bearer {self.token}', 'X-GitHub-Api-Version': '2022-11-28',
+        token = self.token() if callable(self.token) else self.token
+        headers = {'Authorization': f'Bearer {token}', 'X-GitHub-Api-Version': '2022-11-28',
                    'Accept': 'application/vnd.github.raw+json' if raw else 'application/vnd.github+json',
                    'User-Agent': 'superagent-uat'}
         data = None if body is None else json.dumps(body).encode()

@@ -1,6 +1,6 @@
 """Test a pull request's preview deployment, after proving that it runs the pull request's head.
 
-Everything about the preview comes from the trusted workflow, never from the
+Everything about the preview comes from the UAT gate's policy, never from the
 pull request or the issue: the URL template (`{pr}` is the PR number), the
 allowed host patterns (`example.com` exactly, `*.example.com` any subdomain),
 the revision path and the test credentials. `.superagent/uat.yaml` may only
@@ -122,7 +122,7 @@ def credentials_file(raw, directory):
 
 
 def run_preview(meta, spec, entry, settings, policy, out_dir, checkout=None):
-    """The Outcome of testing the PR's verified preview; `policy` holds the workflow's preview settings."""
+    """The Outcome of testing the PR's verified preview; `policy` holds the gate's preview settings."""
     patterns = policy['allowed_hosts']
     p, environment = settings.prefix, dict(os.environ if settings.environment is None else settings.environment)
     private = os.path.join(os.path.dirname(out_dir.rstrip('/')), f'{p}-private')

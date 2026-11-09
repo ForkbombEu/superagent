@@ -1,7 +1,5 @@
 """Preview environments: trusted URL policy, readiness, SHA proof, redirects, credentials and redaction."""
-import base64
 import json
-import os
 import shutil
 import tempfile
 import threading
@@ -9,10 +7,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from uat import controller, preview
-from uat.tests import docker_support as ds
-from uat.tests.test_dsh_tester import INVALID
 from uat.tests.test_gate import Gate
-from uat.tests.test_sandbox import FIXTURE, TESTS, result
 from uat.tests.test_spec import ISSUE
 
 SHA = 'c' * 40
@@ -57,7 +52,7 @@ class PolicyTest(unittest.TestCase):
                               ('example.com', False), ('preview.example.com.evil.net', False), ('', False)):
             self.assertEqual(preview.host_allowed(host, patterns), allowed, host)
 
-    def test_url_template_comes_from_the_workflow(self):
+    def test_url_template_comes_from_the_policy(self):
         self.assertEqual(preview.preview_url('https://pr-{pr}.pr.example.com/app', 12, ['*.pr.example.com']),
                          'https://pr-12.pr.example.com')
         for template in ('https://pr-{pr}.evil.net', 'ftp://pr-{pr}.pr.example.com', 'pr-{pr}.pr.example.com'):
@@ -97,132 +92,37 @@ class PolicyTest(unittest.TestCase):
 
 class PreviewGateTest(Gate):
     def configure(self, **extra):
-        return {'UAT_ENVIRONMENTS': 'local preview', 'UAT_PREVIEW_URL': 'https://pr-{pr}.preview.example.com',
-                'UAT_PREVIEW_ALLOWED_HOSTS': '*.preview.example.com', 'UAT_PREVIEW_REVISION_PATH': '/revision', **extra}
+        return {'SUPERAGENT_UAT_ENVIRONMENTS': 'local preview',
+                'SUPERAGENT_UAT_PREVIEW_URL': 'https://pr-{pr}.preview.example.com',
+                'SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS': '*.preview.example.com',
+                'SUPERAGENT_UAT_PREVIEW_REVISION_PATH': '/revision', **extra}
 
-    def test_preview_needs_the_workflow_to_configure_it(self):
+    def test_preview_needs_the_gate_policy_to_configure_it(self):
         self.gh.add_issue(7, PREVIEW_ISSUE)
-        self.start(UAT_ENVIRONMENTS='local preview')
-        self.assertIn('configures no preview URL', self.latest('1' * 40)[0]['output']['summary'])
+        run = self.request(on=self.make_gate(SUPERAGENT_UAT_ENVIRONMENTS='local preview'))
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn('configures no preview URL', run['summary'])
 
     def test_preview_host_outside_the_allowlist_is_blocked(self):
         self.gh.add_issue(7, PREVIEW_ISSUE)
-        self.start(**self.configure(UAT_PREVIEW_URL='https://pr-{pr}.evil.net'))
-        run, marker = self.latest('1' * 40)
-        self.assertEqual(marker['verdict'], 'BLOCKED')
-        self.assertIn('not one of the allowed preview hosts', run['output']['summary'])
+        run = self.request(on=self.make_gate(**self.configure(SUPERAGENT_UAT_PREVIEW_URL='https://pr-{pr}.evil.net')))
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn('not one of the allowed preview hosts', run['summary'])
+
+    def test_issue_cannot_pick_an_environment_the_policy_does_not_allow(self):
+        self.gh.add_issue(7, PREVIEW_ISSUE)
+        run = self.request()
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn("'preview' is not enabled", run['summary'])
 
     def test_configured_preview_runs(self):
         self.gh.add_issue(7, PREVIEW_ISSUE)
-        outputs = self.start(**self.configure())
-        self.assertEqual(outputs['run'], 'true')
-        snapshot = json.loads(base64.b64decode(outputs['snapshot']))
+        self.gate = self.make_gate(**self.configure())
+        run = self.request()
+        self.assertEqual(run['state'], 'QUEUED')
+        snapshot = json.loads(self.gate.one('SELECT snapshot FROM runs WHERE id = ?', run['run_id'])['snapshot'])
         self.assertEqual(snapshot['entry'], {'type': 'preview', 'readiness_path': '/health'})
-        # finish derives with the same policy: the key still matches.
-        found = controller.derive(self.context(**self.configure()), 9)
-        self.assertEqual(found['key'], snapshot['key'])
-
-
-class PreviewPipelineTest(Gate):
-    """controller.test against a real preview container, with real DSH through the proxy."""
-
-    @classmethod
-    def setUpClass(cls):
-        ds.require_docker()
-        ds.build(ds.TESTER_IMAGE, 'tester/Dockerfile')
-        cls.network = f'uat-preview-test-{os.getpid()}'
-        cls.model_dir = tempfile.mkdtemp()
-        os.chmod(cls.model_dir, 0o755)
-        shutil.copy(os.path.join(TESTS, 'mock_model.py'), cls.model_dir)
-        ds.docker('network', 'create', cls.network)
-        ds.docker('run', '-d', '--name', f'{cls.network}-mock', '--network', cls.network, '-v',
-                  f'{cls.model_dir}:/m:ro', ds.TESTER_IMAGE, 'python3', '/m/mock_model.py', '8080', '/m/script.json')
-
-    @classmethod
-    def tearDownClass(cls):
-        for name in ('mock', 'preview'):
-            ds.docker('rm', '-f', f'{cls.network}-{name}', check=False)
-        ds.docker('network', 'rm', cls.network, check=False)
-        shutil.rmtree(cls.model_dir, ignore_errors=True)
-
-    def setUp(self):
-        super().setUp()
-        self.run_id = f'{os.getpid()}{len(os.listdir(self.model_dir))}{id(self) % 1000}'
-        self.gh.add_issue(7, PREVIEW_ISSUE)
-
-    def tearDown(self):
-        ds.docker('rm', '-f', f'{self.network}-preview', check=False)
-        for kind in ('tester', 'sandbox'):
-            ds.docker('rmi', f'superagent-uat-{kind}:{self.run_id}', check=False)
-
-    def deploy(self, revision):
-        ds.docker('run', '-d', '--name', f'{self.network}-preview', '--network', self.network, '-e',
-                  f'APP_REVISION={revision}', '-v', f'{FIXTURE}:/app:ro', ds.TESTER_IMAGE, 'python3', '/app/server.py',
-                  '3000', '0.0.0.0')
-        address = ds.docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',
-                            f'{self.network}-preview').stdout.strip()
-        return {'UAT_ENVIRONMENTS': 'preview', 'UAT_PREVIEW_URL': f'http://{address}:3000',
-                'UAT_PREVIEW_ALLOWED_HOSTS': address, 'UAT_PREVIEW_REVISION_PATH': '/revision',
-                'UAT_PREVIEW_READY_TIMEOUT_SECONDS': '30'}
-
-    def run_pipeline(self, policy, steps):
-        outputs = self.start(**policy)
-        self.assertEqual(outputs['run'], 'true')
-        snapshot = json.loads(base64.b64decode(outputs['snapshot']))
-        if steps[-1].get('final') == 'RESULT':
-            steps[-1]['final'] = result({**snapshot['meta']}, 'PASS').replace(
-                'HTTP 400, no record', 'HTTP 400 for credentials long-enough-preview-secret')
-        with open(os.path.join(self.model_dir, 'script.json'), 'w') as file:
-            json.dump({'steps': steps}, file)
-        ctx = self.context(UAT_SNAPSHOT=outputs['snapshot'], GITHUB_RUN_ID=self.run_id, DEEPSEEK_API_KEY='sk-preview-key',
-                           DEEPSEEK_BASE_URL=f'http://{self.network}-mock:8080', UAT_PROXY_NETWORKS=self.network,
-                           UAT_PREVIEW_CREDENTIALS='{"UAT_PASSWORD": "long-enough-preview-secret"}',
-                           GITHUB_SERVER_URL='file:///nonexistent', **policy)
-        # The checkout is only documentation for the tester: give the fixture instead of fetching.
-        original = controller.sandbox.checkout
-        controller.sandbox.checkout = lambda repository, sha, destination, **_: shutil.copytree(
-            FIXTURE, destination, dirs_exist_ok=True)
-        try:
-            controller.test(ctx)
-        finally:
-            controller.sandbox.checkout = original
-        self.assertEqual(ds.leftovers(f'superagent-uat-{self.run_id}-'), [])
-        with open(os.path.join(ctx.out_dir, 'outcome.json')) as file:
-            outcome = json.load(file)
-        self.finish(outputs, **policy)
-        return outcome, ctx.out_dir
-
-    def test_current_preview_passes_and_credentials_never_leave(self):
-        policy = self.deploy('1' * 40)
-        origin = policy['UAT_PREVIEW_URL']
-        create = (f"curl -sS -i -X POST -H 'content-type: application/json' -d '{{\"name\":\"uat-9\"}}' {origin}/records "
-                  f"| tee artifacts/uat-1-create.txt && curl -sS -i {origin}/records/1 | tee artifacts/uat-1-get.txt")
-        steps = [{'bash': create}, {'bash': INVALID.replace('http://127.0.0.1:3000', origin)},
-                 {'bash': 'cp /uat-credentials.json artifacts/app.log && cat /uat-credentials.json'}, {'final': 'RESULT'}]
-        outcome, out = self.run_pipeline(policy, steps)
-        self.assertEqual((outcome['verdict'], outcome['reasons']), ('PASS', []))
-        for root, _, names in os.walk(out):
-            for name in names:
-                with open(os.path.join(root, name), 'rb') as file:
-                    self.assertNotIn(b'long-enough-preview-secret', file.read(), os.path.join(root, name))
-        run, marker = self.latest('1' * 40)
-        self.assertEqual((run['conclusion'], marker['verdict']), ('success', 'PASS'))
-        self.assertNotIn('long-enough-preview-secret', json.dumps(run))
-        self.assertIn('[REDACTED]', run['output']['summary'])
-
-    def test_stale_preview_is_blocked_before_any_test(self):
-        outcome, out = self.run_pipeline(self.deploy('d' * 40), [{'final': 'RESULT'}])
-        self.assertEqual(outcome['verdict'], 'BLOCKED')
-        self.assertIn('stale', outcome['reasons'][0])
-        self.assertFalse(os.path.exists(os.path.join(out, 'tester')))
-        self.assertEqual(self.latest('1' * 40)[1]['verdict'], 'BLOCKED')
-
-    def test_unavailable_preview_is_blocked(self):
-        policy = self.deploy('1' * 40)
-        ds.docker('rm', '-f', f'{self.network}-preview')
-        outcome, _ = self.run_pipeline({**policy, 'UAT_PREVIEW_READY_TIMEOUT_SECONDS': '3'}, [{'final': 'RESULT'}])
-        self.assertEqual(outcome['verdict'], 'BLOCKED')
-        self.assertIn('unavailable', outcome['reasons'][0])
+        self.assertEqual(controller.derive(self.gate.ctx, 9)['key'], snapshot['key'])
 
 
 if __name__ == '__main__':

@@ -19,6 +19,10 @@ esac
 case "${SUPERAGENT_UAT_APP_ID:-}" in
   ''|*[!0-9]*) [ -z "${SUPERAGENT_UAT_APP_ID:-}" ] || {
     echo 'SUPERAGENT_UAT_APP_ID must be the numeric id of the UAT GitHub App' >&2; exit 1; } ;;
+  *) uat_token=${SUPERAGENT_UAT_GATE_TOKEN:-}
+     [ "${#uat_token}" -ge 32 ] || {
+       echo 'Set SUPERAGENT_UAT_GATE_TOKEN (32+ characters, the same in uat-gate) to use user acceptance tests' >&2
+       exit 1; } ;;
 esac
 
 # Validate OWNER/REPO before deriving a local checkout path.
@@ -49,13 +53,21 @@ print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
 PY
 unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
 
-# uat-test reads the id of the GitHub App whose superagent/uat check it trusts.
-# Not a secret; kept next to the others so worker shells find it however DSH
-# filters their environment. No file: UAT is off.
+# uat-test reads the gate's URL, the request token and the id of the GitHub App
+# whose superagent/uat check it trusts. The token only lets a requester ask for
+# runs; the gate decides and publishes everything itself. No file: UAT is off.
 rm -f /run/superagent-secrets/uat.json
 if [ -n "${SUPERAGENT_UAT_APP_ID:-}" ]; then
-  printf '{"app_id": %s}\n' "$SUPERAGENT_UAT_APP_ID" > /run/superagent-secrets/uat.json
+  install -m 0600 /dev/null /run/superagent-secrets/uat.json
+  python3 > /run/superagent-secrets/uat.json <<'PY'
+import json, os
+print(json.dumps({'app_id': int(os.environ['SUPERAGENT_UAT_APP_ID']),
+                  'gate_url': os.environ.get('SUPERAGENT_UAT_GATE_URL') or 'http://uat-gate:8090',
+                  'token': os.environ['SUPERAGENT_UAT_GATE_TOKEN'],
+                  'check_name': os.environ.get('SUPERAGENT_UAT_CHECK_NAME') or 'superagent/uat'}))
+PY
 fi
+unset SUPERAGENT_UAT_GATE_TOKEN
 
 # Use exactly the agent identity supplied by the token; never interactive login.
 /usr/local/bin/gh-agent api user --jq .login > /dev/null || {

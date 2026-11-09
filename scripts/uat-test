@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Wait for the trusted UAT verdict on one pull request commit, for dsh-superagent workers.
+"""Ask the UAT gate to test one pull request commit and wait for its verdict, for dsh-superagent workers.
 
-Usage: uat-test <owner/repo> <pr number> <head sha>
+Usage, run as a background job:
+  uat-test <owner/repo> <pr number> <head sha>            request UAT of the head and wait
+  uat-test --verify <owner/repo> <pr number> <head sha>   before merging: does its PASS still hold?
+  uat-test --artifact <run id> <path>                     print one file a run kept (logs, evidence)
 
-The superagent-uat workflow of the target repository (templates/superagent-uat.yml)
-tests every new PR head by itself and publishes the `superagent/uat` check
-through its own GitHub App. This command only asks for a run when none starts
-(or the last result went stale) and reads that App's check run: it cannot
-produce a verdict, and a status or check from anyone else is ignored.
+DSH Superagent decides when to test and what to do next; this command only
+asks the trusted UAT gate (the uat-gate service) for a run of the head. The
+gate re-reads the PR, its issue and the policy from GitHub itself, runs the
+DeepSeek tester on its isolated runner and publishes the `superagent/uat`
+check through its GitHub App. This command accepts no verdict and sends none:
+it checks that the gate's answer is the App's check on GitHub before trusting
+it, and a status or check from anyone else is ignored.
 
 The report (verdict, failing scenarios with expected, observed and
-reproduction, the run with the evidence) is printed and kept under
+reproduction, the run id for --artifact) is printed and kept under
 ~/.local/state/uat-test.
 
-Exit status: 0 PASS, or no UAT required, for <head sha>; 1 FAIL; 2 BLOCKED
-(including no failing rounds left); 3 no verdict (no controller answered, or
-an error).
+Exit status: 0 PASS, or no UAT required, for <head sha> (for --verify: the
+result still holds); 1 FAIL (--verify: it does not); 2 BLOCKED (including no
+failing rounds left); 3 no verdict (gate unreachable, timeout, a mismatch with
+GitHub, or an error).
 """
 import json
 import os
@@ -23,18 +29,19 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
-# Written by superagent-entrypoint.sh from SUPERAGENT_UAT_APP_ID.
+# Written by superagent-entrypoint.sh: the App id, gate URL and request token.
 CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
-CHECK_NAME = 'superagent/uat'
 MARKER = re.compile(r'<!-- superagent-uat (\{.*?\}) -->')
 HISTORY = os.path.expanduser('~/.local/state/uat-test')
 GH = os.environ.get('UAT_TEST_GH', 'gh-agent')
-POLL_SECONDS = float(os.environ.get('UAT_TEST_POLL_SECONDS', '30'))
-# A run starts within a minute or two of a push; ask for one after this long without one.
-GRACE_SECONDS = float(os.environ.get('UAT_TEST_GRACE_SECONDS', '240'))
+POLL_SECONDS = float(os.environ.get('UAT_TEST_POLL_SECONDS', '15'))
 TIMEOUT_SECONDS = float(os.environ.get('UAT_TEST_TIMEOUT_SECONDS', str(150 * 60)))
-MAX_REQUESTS = 2
+# How long the gate may stay unreachable before giving up (restarts take well under this).
+OUTAGE_SECONDS = float(os.environ.get('UAT_TEST_OUTAGE_SECONDS', '300'))
+MAX_STALE_REQUESTS = 2
 EXIT = {'PASS': 0, 'NOT_REQUIRED': 0, 'FAIL': 1, 'BLOCKED': 2}
 
 
@@ -43,19 +50,50 @@ def fail(message, status=3):
     sys.exit(status)
 
 
-def gh(*args, stdin=None):
-    result = subprocess.run([GH, *args], input=stdin, capture_output=True, text=True)
+def load_config():
+    try:
+        with open(CONFIG, encoding='utf-8') as file:
+            config = json.load(file)
+        return int(config['app_id']), config['gate_url'].rstrip('/'), config['token'], config.get('check_name') or 'superagent/uat'
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        fail(f'UAT is not configured in this deployment ({CONFIG}: {error})')
+
+
+def gate(method, path, body=None):
+    """(status, answer) from the gate, retrying while it is unreachable for up to OUTAGE_SECONDS."""
+    _, url, token, _ = load_config()
+    deadline = time.monotonic() + OUTAGE_SECONDS
+    while True:
+        request = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                         headers={'authorization': f'Bearer {token}', 'content-type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read()
+                return response.status, (raw if path.startswith('/v1/uat/runs/') and '/files/' in path else json.loads(raw))
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read())
+            except ValueError:
+                return error.code, {'error': f'HTTP {error.code}'}
+        except (urllib.error.URLError, OSError) as error:
+            if time.monotonic() > deadline:
+                fail(f'the UAT gate at {url} is unreachable: {error}')
+            time.sleep(min(POLL_SECONDS, 10))
+
+
+def gh(*args):
+    result = subprocess.run([GH, *args], capture_output=True, text=True)
     if result.returncode:
         fail(f'{GH} {" ".join(args[:2])} failed: {result.stderr.strip()}')
     return result.stdout
 
 
-def latest(repository, sha, app_id):
-    """The App's newest superagent/uat check run on sha with its marker, or (None, None)."""
-    answer = json.loads(gh('api', f'repos/{repository}/commits/{sha}/check-runs?check_name={CHECK_NAME}'
+def github_check(repository, sha, app_id, check_name):
+    """The App's newest check run of the UAT check on sha, and its marker."""
+    answer = json.loads(gh('api', f'repos/{repository}/commits/{sha}/check-runs?check_name={check_name}'
                                   f'&app_id={app_id}&filter=all&per_page=100'))
     runs = sorted((run for run in answer['check_runs']
-                   if run['name'] == CHECK_NAME and (run.get('app') or {}).get('id') == app_id),
+                   if run['name'] == check_name and (run.get('app') or {}).get('id') == app_id),
                   key=lambda run: run['id'], reverse=True)
     if not runs:
         return None, None
@@ -63,53 +101,43 @@ def latest(repository, sha, app_id):
     return runs[0], json.loads(match.group(1)) if match else None
 
 
-def request_run(repository, number):
-    gh('api', '--method', 'POST', f'repos/{repository}/dispatches', '--input', '-',
-       stdin=json.dumps({'event_type': 'superagent-uat', 'client_payload': {'pr': int(number)}}))
-    print(f'uat-test: requested a UAT run for PR #{number}', flush=True)
+def wait(repository, number, sha):
+    """The completed gate run for the head, requesting it (again when it went stale)."""
+    started, stale = time.monotonic(), 0
+    while True:
+        status, run = gate('POST', '/v1/uat/runs', {'repository': repository, 'pr': int(number), 'head_sha': sha})
+        if status != 200:
+            fail(f'the UAT gate refused the request (HTTP {status}): {run.get("error")}')
+        print(f'uat-test: UAT run {run["run_id"]} for {sha} is {run["state"].lower()}', flush=True)
+        while run['state'] != 'COMPLETE':
+            if time.monotonic() - started > TIMEOUT_SECONDS:
+                fail(f'no UAT verdict for {sha} within {TIMEOUT_SECONDS / 60:.0f} minutes (run {run["run_id"]})')
+            time.sleep(POLL_SECONDS)
+            status, run = gate('GET', f'/v1/uat/runs/{run["run_id"]}')
+            if status != 200:
+                fail(f'the UAT gate lost run (HTTP {status}): {run.get("error")}')
+        if run['verdict'] != 'STALE':
+            return run
+        stale += 1
+        if stale > MAX_STALE_REQUESTS:
+            fail(f'UAT run {run["run_id"]} went stale {stale} times: the PR or its issue keeps changing')
+        print(f'uat-test: UAT run {run["run_id"]} is stale ({run.get("title")}); requesting a new one', flush=True)
 
 
-def main():
-    if len(sys.argv) != 4 or not sys.argv[2].isdigit() or not re.fullmatch(r'[0-9a-f]{40}', sys.argv[3]):
-        fail('usage: uat-test <owner/repo> <pr number> <full 40-character head sha>')
-    repository, number, sha = sys.argv[1:]
-    try:
-        with open(CONFIG, encoding='utf-8') as file:
-            app_id = int(json.load(file)['app_id'])
-    except (OSError, ValueError, KeyError) as error:
-        fail(f'UAT is not configured in this deployment ({CONFIG}: {error})')
-    head = json.loads(gh('pr', 'view', number, '--repo', repository, '--json', 'headRefOid'))['headRefOid']
-    if head != sha:
-        fail(f'the PR head is {head}, not {sha}: test the current head')
-
-    started, requests, stale_id = time.monotonic(), 0, None
-    while time.monotonic() - started < TIMEOUT_SECONDS:
-        run, marker = latest(repository, sha, app_id)
-        if run and stale_id is not None and run['id'] <= stale_id:
-            run = marker = None
-        waited = time.monotonic() - started
-        if run and run['status'] == 'completed' and marker and marker.get('sha') == sha:
-            if marker['verdict'] in EXIT:
-                return report(repository, number, sha, run, marker)
-            if marker['verdict'] == 'STALE' and requests < MAX_REQUESTS:
-                stale_id, requests = run['id'], requests + 1
-                print('uat-test: the last result is stale; requesting a new run', flush=True)
-                request_run(repository, number)
-        elif not run and waited > GRACE_SECONDS * (requests + 1):
-            if requests >= MAX_REQUESTS:
-                fail(f'no UAT run started for {sha} after {requests} requests: is the superagent-uat workflow '
-                     'installed on the default branch and its GitHub App configured?')
-            requests += 1
-            request_run(repository, number)
-        time.sleep(POLL_SECONDS)
-    fail(f'no UAT verdict for {sha} within {TIMEOUT_SECONDS / 60:.0f} minutes')
+def confirm(repository, sha, run):
+    """Trust the gate's answer only when the App's check on GitHub says the same."""
+    app_id, _, _, check_name = load_config()
+    check, marker = github_check(repository, sha, app_id, check_name)
+    if not check or not marker or marker.get('run_id') != run['run_id'] or marker.get('verdict') != run['verdict'] \
+            or check['status'] != 'completed':
+        fail(f'the {check_name} check of the UAT App on {sha} does not match UAT run {run["run_id"]} '
+             f'({run["verdict"]}); not trusting it')
+    return marker
 
 
 def report(repository, number, sha, run, marker):
-    output = run.get('output') or {}
-    text = MARKER.sub('', output.get('text') or '').strip()
-    body = (f'# {output.get("title")}\n\n{output.get("summary") or ""}\n\n{text}\n\n'
-            f'Run, evidence and logs: {run.get("details_url") or marker.get("run_url")}\n').replace('\n\n\n', '\n\n')
+    body = (f'# {run["title"]}\n\n{run["summary"] or ""}\n\n{run["text"] or ""}\n\n'
+            f'UAT run: {run["run_id"]} (files: uat-test --artifact {run["run_id"]} <path>)\n').replace('\n\n\n', '\n\n')
     directory = os.path.join(HISTORY, repository, f'pr-{number}')
     os.makedirs(directory, exist_ok=True)
     saved = os.path.join(directory, f'{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}-{sha[:12]}.md')
@@ -118,9 +146,38 @@ def report(repository, number, sha, run, marker):
     print(body)
     print(f'uat-test: the whole report is in {saved}')
     print(f'uat-test: failing rounds used: {marker.get("failed_rounds", 0)} of {marker.get("max_failed_rounds", "?")}')
-    print(f'uat-test: {marker["verdict"]} for {sha}')
-    sys.exit(EXIT[marker['verdict']])
+    print(f'uat-test: {run["verdict"]} for {sha}')
+    sys.exit(EXIT[run['verdict']])
+
+
+def main(args):
+    if len(args) == 3 and args[0] == '--artifact':
+        status, data = gate('GET', f'/v1/uat/runs/{args[1]}/files/{args[2].lstrip("/")}')
+        if status != 200:
+            fail(f'no such file in UAT run {args[1]}: {data.get("error") if isinstance(data, dict) else status}')
+        sys.stdout.write(data.decode('utf-8', 'replace'))
+        return
+    verify = bool(args) and args[0] == '--verify'
+    args = args[1:] if verify else args
+    if len(args) != 3 or not args[1].isdigit() or not re.fullmatch(r'[0-9a-f]{40}', args[2]):
+        fail('usage: uat-test [--verify] <owner/repo> <pr number> <full 40-character head sha>, '
+             'or uat-test --artifact <run id> <path>')
+    repository, number, sha = args
+    load_config()
+    head = json.loads(gh('pr', 'view', number, '--repo', repository, '--json', 'headRefOid'))['headRefOid']
+    if head != sha:
+        fail(f'the PR head is {head}, not {sha}: test the current head')
+    if verify:
+        status, answer = gate('POST', '/v1/uat/verify', {'repository': repository, 'pr': int(number), 'head_sha': sha})
+        if status != 200:
+            fail(f'the UAT gate refused the check (HTTP {status}): {answer.get("error")}')
+        print(f'uat-test: {"current" if answer["current"] else "NOT current"}: {answer["reason"]}')
+        sys.exit(0 if answer['current'] else 1)
+    run = wait(repository, number, sha)
+    if run['verdict'] not in EXIT:
+        fail(f'UAT run {run["run_id"]} ended with {run["verdict"]!r}')
+    report(repository, number, sha, run, confirm(repository, sha, run))
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])

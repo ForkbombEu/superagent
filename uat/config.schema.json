@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ForkbombEu/superagent/uat/config.schema.json",
   "title": "Superagent UAT target repository configuration (.superagent/uat.yaml)",
-  "description": "PR-controlled: the commands run only inside the disposable sandbox. Preview URLs, hosts, credentials and timeouts come from the trusted workflow, never from this file.",
+  "description": "PR-controlled: the commands run only inside the disposable sandbox. Preview URLs, hosts, credentials and timeouts come from the UAT gate's protected policy, never from this file.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "environments"],

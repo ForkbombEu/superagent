@@ -6,7 +6,7 @@ Usage: proxy.py --listen 0.0.0.0:3128 --allow api.deepseek.com:443 [--allow host
 The tester and the application under test sit on an internal Docker network
 with no route out; this proxy, attached to that network and to an outside one,
 is their only exit. It relays CONNECT tunnels and plain-HTTP requests to the
-exact host:port pairs given with --allow, from the trusted workflow, and
+exact host:port pairs given with --allow by the UAT gate, and
 refuses everything else, including any name that resolves to a loopback,
 link-local (cloud metadata), multicast or unspecified address. Each decision
 is logged on stdout, which the controller keeps as an artifact.

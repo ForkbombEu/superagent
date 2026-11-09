@@ -70,7 +70,7 @@ def parse_config(data):
     """(config, None) or (None, problem) for the bytes of a .superagent/uat.yaml."""
     if len(data) > MAX_CONFIG_BYTES:
         return None, f'{CONFIG_PATH} is larger than {MAX_CONFIG_BYTES} bytes'
-    import yaml  # The runner's python3-yaml; uat/action.yml installs it when missing.
+    import yaml  # py3-yaml in the gate image (uat/gate/Dockerfile).
     try:
         config = yaml.safe_load(data.decode('utf-8'))
     except (yaml.YAMLError, UnicodeDecodeError) as error:
@@ -250,7 +250,7 @@ def checkout(repository, sha, destination, token=None, server='https://github.co
 
 
 def exit_on_signals():
-    """Make SIGTERM, SIGINT and SIGHUP (a cancelled workflow) unwind through the cleanup `finally` blocks."""
+    """Make SIGTERM, SIGINT and SIGHUP (stopping the gate) unwind through the cleanup `finally` blocks."""
     import signal
 
     def stop(number, _):

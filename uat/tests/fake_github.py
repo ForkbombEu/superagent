@@ -2,8 +2,8 @@
 
 It mirrors the permission facts the gate relies on: only the GitHub App's
 installation token can create or update check runs (a personal access token
-gets 403, as on GitHub), anyone with write access can post commit statuses and
-repository dispatches, and `required_check_passes` evaluates a required check
+gets 403, as on GitHub), anyone with write access can post commit statuses,
+an App JWT buys an installation token, and `required_check_passes` evaluates a required check
 pinned to the App as a source-pinned ruleset does: only the App's newest
 `superagent/uat` check run on the commit counts.
 """
@@ -21,8 +21,9 @@ class FakeGitHub:
     def __init__(self, repository='ForkbombEu/sample'):
         self.repository = repository
         self.prs, self.issues, self.contents = {}, {}, {}
-        self.check_runs, self.statuses, self.dispatches = [], [], []
+        self.check_runs, self.statuses = [], []
         self.ids = itertools.count(1000)
+        self.token_requests = []
         self.lock = threading.Lock()
         handler = type('Handler', (Handler,), {'fake': self})
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
@@ -62,6 +63,14 @@ class FakeGitHub:
 
     def answer(self, method, path, query, token, body):
         repo = f'repos/{self.repository}/'
+        is_jwt = token.count('.') == 2
+        if path == f'repos/{self.repository}/installation':
+            return (200, {'id': 77}) if is_jwt else (401, {'message': 'A JSON web token is required'})
+        if method == 'POST' and path == 'app/installations/77/access_tokens':
+            if not is_jwt:
+                return 401, {'message': 'A JSON web token is required'}
+            self.token_requests.append(body)
+            return 201, {'token': APP_TOKEN, 'expires_at': '2099-01-01T00:00:00Z'}
         if not path.startswith(repo) and path != 'graphql':
             return 404, {'message': 'Not Found'}
         rest = path[len(repo):]
@@ -99,9 +108,6 @@ class FakeGitHub:
         if method == 'POST' and parts[0] == 'statuses':
             self.statuses.append({'sha': parts[1], **body, 'token': token})
             return 201, body
-        if method == 'POST' and parts[0] == 'dispatches':
-            self.dispatches.append(body)
-            return 204, None
         return 404, {'message': f'no fake for {method} {path}'}
 
     @staticmethod

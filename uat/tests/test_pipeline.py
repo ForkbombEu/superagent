@@ -1,5 +1,8 @@
-"""The whole workflow on one machine: start, the real test job (checkout, images, sandbox, DSH) and finish."""
-import base64
+"""The gate end to end on one machine: request, the real runner (checkout, images, sandbox, DSH), the check.
+
+The local Docker daemon stands in for uat-runner; a scripted model and the
+sample application stand in for DeepSeek and the pull request.
+"""
 import json
 import os
 import shutil
@@ -7,31 +10,38 @@ import subprocess
 import tempfile
 import unittest
 
-from uat import controller
+from uat import controller, gate
 from uat.tests import docker_support as ds
-from uat.tests import fake_github as fg
 from uat.tests.test_dsh_tester import INVALID
 from uat.tests.test_gate import CONFIG, Gate
 from uat.tests.test_sandbox import FIXTURE, TESTS, result
+from uat.tests.test_spec import ISSUE
+
+PREVIEW_ISSUE = ISSUE.replace('Environment: local', 'Environment: preview')
+CREATE = ("curl -sS -i -X POST -H 'content-type: application/json' -d '{\"name\":\"alice\"}' "
+          "{origin}/records | tee artifacts/uat-1-create.txt && curl -sS -i {origin}/records/1 | tee artifacts/uat-1-get.txt")
 
 
-class PipelineTest(Gate):
+class RunnerGate(Gate):
     @classmethod
     def setUpClass(cls):
         ds.require_docker()
-        cls.models = f'uat-pipeline-test-{os.getpid()}'
+        cls.network = f'uat-pipeline-test-{os.getpid()}'
         cls.model_dir = tempfile.mkdtemp()
         os.chmod(cls.model_dir, 0o755)
         shutil.copy(os.path.join(TESTS, 'mock_model.py'), cls.model_dir)
         ds.build(ds.TESTER_IMAGE, 'tester/Dockerfile')
-        ds.docker('network', 'create', '--internal', cls.models)
-        ds.docker('run', '-d', '--name', f'{cls.models}-mock', '--network', cls.models, '-v', f'{cls.model_dir}:/m:ro',
+        ds.docker('network', 'create', cls.network)
+        ds.docker('run', '-d', '--name', f'{cls.network}-mock', '--network', cls.network, '-v', f'{cls.model_dir}:/m:ro',
                   ds.TESTER_IMAGE, 'python3', '/m/mock_model.py', '8080', '/m/script.json')
 
     @classmethod
     def tearDownClass(cls):
-        ds.docker('rm', '-f', f'{cls.models}-mock', check=False)
-        ds.docker('network', 'rm', cls.models, check=False)
+        for name in ('mock', 'preview'):
+            ds.docker('rm', '-f', f'{cls.network}-{name}', check=False)
+        ds.docker('network', 'rm', cls.network, check=False)
+        for kind in ('tester', 'sandbox'):
+            ds.docker('rmi', f'superagent-uat-{kind}:gate', check=False)
         shutil.rmtree(cls.model_dir, ignore_errors=True)
 
     def setUp(self):
@@ -49,51 +59,105 @@ class PipelineTest(Gate):
         os.rename(os.path.join(origin, '.git'), origin + '.git')
         self.gh.add_pr(9, self.sha, closes=[7])
         self.gh.contents[('.superagent/uat.yaml', self.sha)] = CONFIG
-        self.run_id = f'{os.getpid()}{len(os.listdir(self.dir))}'
 
-    def tearDown(self):
-        for kind in ('tester', 'sandbox'):
-            ds.docker('rmi', f'superagent-uat-{kind}:{self.run_id}', check=False)
-
-    def run_test_job(self, outputs, steps):
-        snapshot = json.loads(base64.b64decode(outputs['snapshot']))
-        final = steps[-1].get('final')
-        if final == 'RESULT':
-            steps[-1]['final'] = result(snapshot['meta'], 'PASS')
+    def run_gate(self, steps, **policy):
+        """Request a run of the head, script the model with the run's own metadata, run it; (run, kept files)."""
+        self.gate = self.make_gate(
+            executor=gate.Runner(lambda: 'ghs_checkout_token_123456', f'file://{self.server}'),
+            DEEPSEEK_API_KEY='sk-pipeline-secret-key', DEEPSEEK_BASE_URL=f'http://{self.network}-mock:8080',
+            SUPERAGENT_UAT_PROXY_NETWORKS=self.network, SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES='3', **policy)
+        run = self.request()
+        self.assertEqual(run['state'], 'QUEUED', run)
+        meta = json.loads(self.gate.one('SELECT snapshot FROM runs WHERE id = ?', run['run_id'])['snapshot'])['meta']
+        if steps[-1].get('final') == 'RESULT':
+            steps[-1]['final'] = result(meta, 'PASS').replace(
+                'HTTP 400, no record', 'HTTP 400 for credentials long-enough-preview-secret')
         with open(os.path.join(self.model_dir, 'script.json'), 'w') as file:
             json.dump({'steps': steps}, file)
-        ctx = self.context(UAT_SNAPSHOT=outputs['snapshot'], GITHUB_SERVER_URL=f'file://{self.server}',
-                           GITHUB_RUN_ID=self.run_id, DEEPSEEK_API_KEY='sk-pipeline-secret-key',
-                           DEEPSEEK_BASE_URL=f'http://{self.models}-mock:8080', UAT_PROXY_NETWORKS=self.models,
-                           UAT_TESTER_TIMEOUT_MINUTES='3')
-        controller.test(ctx)
-        self.assertEqual(ds.leftovers(f'superagent-uat-{self.run_id}-'), [])
-        with open(os.path.join(ctx.out_dir, 'outcome.json')) as file:
-            return json.load(file)
+        self.drain()
+        self.assertEqual(ds.leftovers(f'superagent-uat-{run["run_id"]}-'), [])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', run['run_id'])))
+        run = self.gate.view(self.gate.one('SELECT * FROM runs WHERE id = ?', run['run_id']))
+        return run, os.path.join(self.state, 'runs', run['run_id'])
 
-    def test_pass_goes_from_a_real_run_to_a_passing_check(self):
-        outputs = self.start()
-        create = ("curl -sS -i -X POST -H 'content-type: application/json' -d '{\"name\":\"alice\"}' "
-                  "http://127.0.0.1:3000/records | tee artifacts/uat-1-create.txt && "
-                  "curl -sS -i http://127.0.0.1:3000/records/1 | tee artifacts/uat-1-get.txt")
-        steps = [{'bash': create}, {'bash': INVALID}, {'bash': 'cp /app-logs/app.log artifacts/app.log'},
-                 {'final': 'RESULT'}]
-        outcome = self.run_test_job(outputs, steps)
-        self.assertEqual((outcome['verdict'], outcome['reasons']), ('PASS', []))
-        self.finish(outputs)
-        run, marker = self.latest(self.sha)
-        self.assertEqual((run['conclusion'], marker['verdict']), ('success', 'PASS'), run['output'])
+
+class LocalPipelineTest(RunnerGate):
+    def test_pass_goes_from_a_real_run_to_a_passing_app_check(self):
+        steps = [{'bash': CREATE.replace('{origin}', 'http://127.0.0.1:3000')}, {'bash': INVALID},
+                 {'bash': 'cp /app-logs/app.log artifacts/app.log'}, {'final': 'RESULT'}]
+        run, kept = self.run_gate(steps)
+        self.assertEqual(run['verdict'], 'PASS', run)
         self.assertTrue(self.gh.required_check_passes(self.sha))
+        with open(os.path.join(kept, 'tester-work', 'attempt-1', 'artifacts', 'uat-1-create.txt')) as file:
+            self.assertIn('201 Created', file.read())
+        self.assertTrue(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
 
     def test_hallucinated_pass_never_reaches_the_check(self):
-        outputs = self.start()
-        outcome = self.run_test_job(outputs, [{'final': 'RESULT'}])
-        self.assertEqual(outcome['verdict'], 'BLOCKED')
-        self.finish(outputs)
-        run, marker = self.latest(self.sha)
-        self.assertEqual((run['conclusion'], marker['verdict']), ('failure', 'BLOCKED'))
-        self.assertIn('executed no command', run['output']['summary'])
+        run, _ = self.run_gate([{'final': 'RESULT'}])
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn('executed no command', run['summary'])
         self.assertFalse(self.gh.required_check_passes(self.sha))
+
+    def test_secrets_never_reach_the_kept_files(self):
+        steps = [{'bash': 'echo "$DEEPSEEK_API_KEY $GH_TOKEN" > artifacts/env.txt; cat /proc/1/environ > artifacts/p1 2>&1; '
+                          'true'}, {'final': 'RESULT'}]
+        run, kept = self.run_gate(steps)
+        for root, _, names in os.walk(kept):
+            for name in names:
+                with open(os.path.join(root, name), 'rb') as file:
+                    data = file.read()
+                self.assertNotIn(b'sk-pipeline-secret-key', data, name)
+                self.assertNotIn(b'ghs_checkout_token_123456', data, name)
+
+
+class PreviewPipelineTest(RunnerGate):
+    def setUp(self):
+        super().setUp()
+        self.gh.add_issue(7, PREVIEW_ISSUE)
+
+    def tearDown(self):
+        ds.docker('rm', '-f', f'{self.network}-preview', check=False)
+
+    def deploy(self, revision):
+        ds.docker('run', '-d', '--name', f'{self.network}-preview', '--network', self.network, '-e',
+                  f'APP_REVISION={revision}', '-v', f'{FIXTURE}:/app:ro', ds.TESTER_IMAGE, 'python3', '/app/server.py',
+                  '3000', '0.0.0.0')
+        address = ds.docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',
+                            f'{self.network}-preview').stdout.strip()
+        return {'SUPERAGENT_UAT_ENVIRONMENTS': 'preview', 'SUPERAGENT_UAT_PREVIEW_URL': f'http://{address}:3000',
+                'SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS': address, 'SUPERAGENT_UAT_PREVIEW_REVISION_PATH': '/revision',
+                'SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS': '30',
+                'SUPERAGENT_UAT_PREVIEW_CREDENTIALS': '{"UAT_PASSWORD": "long-enough-preview-secret"}'}
+
+    def test_current_preview_passes_and_credentials_never_leave(self):
+        policy = self.deploy(self.sha)
+        origin = policy['SUPERAGENT_UAT_PREVIEW_URL']
+        steps = [{'bash': CREATE.replace('{origin}', origin)}, {'bash': INVALID.replace('http://127.0.0.1:3000', origin)},
+                 {'bash': 'cp /uat-credentials.json artifacts/app.log && cat /uat-credentials.json'}, {'final': 'RESULT'}]
+        run, kept = self.run_gate(steps, **policy)
+        self.assertEqual(run['verdict'], 'PASS', run)
+        for root, _, names in os.walk(kept):
+            for name in names:
+                with open(os.path.join(root, name), 'rb') as file:
+                    self.assertNotIn(b'long-enough-preview-secret', file.read(), os.path.join(root, name))
+        check, marker = self.latest(self.sha)
+        self.assertEqual((check['conclusion'], marker['verdict']), ('success', 'PASS'))
+        self.assertNotIn('long-enough-preview-secret', json.dumps(check) + json.dumps(run))
+        self.assertIn('[REDACTED]', check['output']['summary'])
+
+    def test_stale_preview_is_blocked_before_any_test(self):
+        run, kept = self.run_gate([{'final': 'RESULT'}], **self.deploy('d' * 40))
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn('stale', run['summary'])
+        self.assertFalse(os.path.exists(os.path.join(kept, 'tester')))
+        self.assertFalse(self.gh.required_check_passes(self.sha))
+
+    def test_unavailable_preview_is_blocked(self):
+        policy = self.deploy(self.sha)
+        ds.docker('rm', '-f', f'{self.network}-preview')
+        run, _ = self.run_gate([{'final': 'RESULT'}], **{**policy, 'SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS': '3'})
+        self.assertEqual(run['verdict'], 'BLOCKED')
+        self.assertIn('unavailable', run['summary'])
 
 
 class RedactionTest(unittest.TestCase):

@@ -33,6 +33,10 @@ services:
       # Optional Claude Code reviewer model and effort (scripts/claude-review).
       SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
+      # Optional user acceptance tests: the numeric id of the GitHub App that
+      # publishes superagent/uat from the target repository's workflow. Not a
+      # secret; the App's private key never belongs in this deployment.
+      SUPERAGENT_UAT_APP_ID: ${SUPERAGENT_UAT_APP_ID:-}
       # Coolify derives these from the dashboard's domain (declared below). They
       # are required at start by superagent-entrypoint.sh rather than with `:?`
       # here, so `docker compose build` does not depend on them.

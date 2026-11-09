@@ -11,7 +11,8 @@ converges these fields, overwriting panel edits of the same fields:
   optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
 - Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
 - Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, the Claude
-  Code review and squash-merge procedure
+  Code review and squash-merge procedure, followed by delivery-uat.md, the user
+  acceptance tests procedure, when $SUPERAGENT_UAT_APP_ID is set
 
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
 the loop re-reads settings after each save until nothing differs.
@@ -29,6 +30,7 @@ HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
 GH_CLI = '/usr/local/bin/gh-agent'
 PREPARE = '/usr/local/bin/prepare-worktree.sh'
 DELIVERY = '/usr/local/share/superagent/delivery.md'
+DELIVERY_UAT = '/usr/local/share/superagent/delivery-uat.md'
 # DSH and dsh-superagent restarts each take well under a minute; this covers a slow first boot.
 DEADLINE_SECONDS = 900
 
@@ -103,8 +105,10 @@ def changes(view, prompts, users, executor_env, delivery):
 
 def main():
     users, executor_env = allowed_users(), executor_settings()
-    with open(DELIVERY, encoding='utf-8') as file:
-        delivery = file.read().strip()
+    delivery = ''
+    for path in (DELIVERY, *([DELIVERY_UAT] if os.environ.get('SUPERAGENT_UAT_APP_ID') else [])):
+        with open(path, encoding='utf-8') as file:
+            delivery += ('\n\n' if delivery else '') + file.read().strip()
     # Each block is saved at most once per run, so a value the API normalizes cannot loop.
     saved, failed = set(), set()
     deadline = time.monotonic() + DEADLINE_SECONDS

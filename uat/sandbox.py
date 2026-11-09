@@ -62,12 +62,17 @@ def load_config(checkout):
         return None, f'{CONFIG_PATH} must not be a symbolic link'
     if not os.path.exists(path):
         return None, None
-    if os.path.getsize(path) > MAX_CONFIG_BYTES:
+    with open(path, 'rb') as file:
+        return parse_config(file.read(MAX_CONFIG_BYTES + 1))
+
+
+def parse_config(data):
+    """(config, None) or (None, problem) for the bytes of a .superagent/uat.yaml."""
+    if len(data) > MAX_CONFIG_BYTES:
         return None, f'{CONFIG_PATH} is larger than {MAX_CONFIG_BYTES} bytes'
     import yaml  # The runner's python3-yaml; uat/action.yml installs it when missing.
     try:
-        with open(path, encoding='utf-8') as file:
-            config = yaml.safe_load(file)
+        config = yaml.safe_load(data.decode('utf-8'))
     except (yaml.YAMLError, UnicodeDecodeError) as error:
         return None, f'{CONFIG_PATH} is not valid YAML: {error}'
     errors = schema.errors(config, schema.load('config'))
@@ -134,6 +139,16 @@ def wait_ready(prefix, ready_url, timeout):
     return f'{ready_url} did not answer within {timeout} s'
 
 
+def start_proxy(settings, extra_allow=()):
+    """The allowlisting proxy on `<p>-egress`, also joined to `<p>-internal` and settings.proxy_networks."""
+    p = settings.prefix
+    allowed = [item for host in (*settings.allow, *extra_allow) for item in ('--allow', host)]
+    docker('run', '-d', '--name', f'{p}-proxy', '--network', f'{p}-egress', *LIMITS, settings.tester_image,
+           'python3', '/usr/local/lib/superagent-uat/proxy.py', *allowed)
+    for network in (f'{p}-internal', *settings.proxy_networks):
+        docker('network', 'connect', network, f'{p}-proxy')
+
+
 def run_local(meta, spec, checkout, entry, settings, out_dir):
     """The Outcome of testing the checkout's local environment `entry`; artifacts stay in out_dir."""
     p, environment = settings.prefix, dict(os.environ if settings.environment is None else settings.environment)
@@ -155,11 +170,7 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
             reason = f'did not finish within {settings.setup_timeout} s' if timed_out else f'exited with status {code}'
             return results.Outcome(results.FAIL, [f'the sandbox setup ({entry.get("setup") or "mise install"}) {reason}; '
                                                   f'last output:\n{tail(setup_log)}'])
-        allowed = [item for host in settings.allow for item in ('--allow', host)]
-        docker('run', '-d', '--name', f'{p}-proxy', '--network', f'{p}-egress', *LIMITS, settings.tester_image,
-               'python3', '/usr/local/lib/superagent-uat/proxy.py', *allowed)
-        for network in (f'{p}-internal', *settings.proxy_networks):
-            docker('network', 'connect', network, f'{p}-proxy')
+        start_proxy(settings)
         docker('run', '-d', '--name', f'{p}-pod', '--network', f'{p}-internal', *user, *LIMITS,
                settings.sandbox_image, 'sleep', 'infinity')
         docker('run', '-d', '--init', '--name', f'{p}-app', '--network', f'container:{p}-pod', *user, *LIMITS, *mounts,
@@ -217,10 +228,10 @@ def prune(directory, limit=MAX_UPLOAD_BYTES):
                 os.remove(path)
 
 
-def checkout(repository, sha, destination, token=None):
+def checkout(repository, sha, destination, token=None, server='https://github.com'):
     """A detached checkout of `sha` with no stored credential; raises unless HEAD is exactly sha."""
     os.makedirs(destination)
-    server = os.environ.get('GITHUB_SERVER_URL', 'https://github.com').rstrip('/')
+    server = server.rstrip('/')
     environment = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
     if token:
         import base64

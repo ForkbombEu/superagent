@@ -1,0 +1,60 @@
+name: Superagent UAT controller
+description: >-
+  One step of the trusted superagent-uat workflow (templates/superagent-uat.yml):
+  start, test, finish or route. Use it pinned to a full commit SHA.
+inputs:
+  command:
+    description: start, test, finish or route
+    required: true
+  app-id:
+    description: Numeric id of the GitHub App that publishes superagent/uat (filters its check runs)
+    required: true
+  check-token:
+    description: Installation token of that App (start, finish, route); never given to test
+    default: ''
+  read-token:
+    description: A read-only token for this repository, normally github.token
+    required: true
+  snapshot:
+    description: The start job's snapshot output (test, finish)
+    default: ''
+  test-result:
+    description: needs.test.result (finish)
+    default: ''
+  environments:
+    description: Environment names UAT may use, space-separated (local, preview)
+    default: local
+  max-failed-rounds:
+    description: Failing UAT rounds a pull request gets before it is blocked
+    default: '3'
+  tester-timeout-minutes:
+    description: Time limit of one tester attempt
+    default: '30'
+outputs:
+  run:
+    description: '"true" when the start job created a run for test and finish'
+    value: ${{ steps.controller.outputs.run }}
+  snapshot:
+    description: What test and finish are bound to (base64 JSON)
+    value: ${{ steps.controller.outputs.snapshot }}
+runs:
+  using: composite
+  steps:
+    - name: Ensure PyYAML
+      shell: bash
+      run: python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+    - id: controller
+      name: Run the controller
+      shell: bash
+      working-directory: ${{ github.action_path }}/..
+      env:
+        UAT_COMMAND: ${{ inputs.command }}
+        UAT_APP_ID: ${{ inputs.app-id }}
+        UAT_CHECK_TOKEN: ${{ inputs.check-token }}
+        UAT_READ_TOKEN: ${{ inputs.read-token }}
+        UAT_SNAPSHOT: ${{ inputs.snapshot }}
+        UAT_TEST_RESULT: ${{ inputs.test-result }}
+        UAT_ENVIRONMENTS: ${{ inputs.environments }}
+        UAT_MAX_FAILED_ROUNDS: ${{ inputs.max-failed-rounds }}
+        UAT_TESTER_TIMEOUT_MINUTES: ${{ inputs.tester-timeout-minutes }}
+      run: python3 -m uat.controller "$UAT_COMMAND"

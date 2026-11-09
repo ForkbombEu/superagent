@@ -89,14 +89,10 @@ class CheckoutTest(unittest.TestCase):
         git('config', 'uploadpack.allowAnySHA1InWant', 'true')
         os.rename(os.path.join(origin, '.git'), origin + '.git')
         destination = os.path.join(root, 'checkout')
-        previous = os.environ.get('GITHUB_SERVER_URL')
-        os.environ['GITHUB_SERVER_URL'] = f'file://{root}'
-        try:
-            sandbox.checkout('ForkbombEu/sample', first, destination, token='ghs_secret')
-            with self.assertRaises(subprocess.CalledProcessError):
-                sandbox.checkout('ForkbombEu/sample', 'f' * 40, os.path.join(root, 'missing'))
-        finally:
-            os.environ.pop('GITHUB_SERVER_URL') if previous is None else os.environ.update(GITHUB_SERVER_URL=previous)
+        server = f'file://{root}'
+        sandbox.checkout('ForkbombEu/sample', first, destination, token='ghs_secret', server=server)
+        with self.assertRaises(subprocess.CalledProcessError):
+            sandbox.checkout('ForkbombEu/sample', 'f' * 40, os.path.join(root, 'missing'), server=server)
         self.assertEqual(git('rev-parse', 'HEAD', cwd=destination).stdout.strip(), first)
         with open(os.path.join(destination, '.git', 'config')) as file:
             self.assertNotIn('ghs_secret', file.read())

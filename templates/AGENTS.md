@@ -63,10 +63,14 @@ dependencies, standards to follow, what must never be done. One bullet each. -->
 The agent account `@forkboteu` squash-merges a pull request it opened, without
 further human approval, once an independent Claude Code review of the pull
 request's exact head commit passes and all required CI checks pass
-(`gh pr merge --squash --match-head-commit <reviewed sha>`). It never merges
-any other pull request, never uses `--admin` or bypasses branch protection, and
-does not merge work whose issue or comment explicitly forbids merging. Every
-other merge needs human approval.
+(`gh pr merge --squash --match-head-commit <reviewed sha>`). When the
+deployment runs user acceptance tests, those checks include `superagent/uat`
+on that commit (see "User acceptance tests" below), and a pull request that
+changes `.github/workflows/` or `.github/actions/` is left for a person to
+review and merge, as those files can reach the UAT workflow's credentials. It
+never merges any other pull request, never uses `--admin` or bypasses branch
+protection, and does not merge work whose issue or comment explicitly forbids
+merging. Every other merge needs human approval.
 
 ## Writing issues
 

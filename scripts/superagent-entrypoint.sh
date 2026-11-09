@@ -16,6 +16,10 @@ case "${SUPERAGENT_REVIEWER_EFFORT:-}" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo 'SUPERAGENT_REVIEWER_EFFORT must be low, medium, high, xhigh or max' >&2; exit 1 ;;
 esac
+case "${SUPERAGENT_UAT_APP_ID:-}" in
+  ''|*[!0-9]*) [ -z "${SUPERAGENT_UAT_APP_ID:-}" ] || {
+    echo 'SUPERAGENT_UAT_APP_ID must be the numeric id of the UAT GitHub App' >&2; exit 1; } ;;
+esac
 
 # Validate OWNER/REPO before deriving a local checkout path.
 python3 - "$GITHUB_REPOSITORY" <<'PY'
@@ -44,6 +48,14 @@ print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
                   'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}))
 PY
 unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+
+# uat-test reads the id of the GitHub App whose superagent/uat check it trusts.
+# Not a secret; kept next to the others so worker shells find it however DSH
+# filters their environment. No file: UAT is off.
+rm -f /run/superagent-secrets/uat.json
+if [ -n "${SUPERAGENT_UAT_APP_ID:-}" ]; then
+  printf '{"app_id": %s}\n' "$SUPERAGENT_UAT_APP_ID" > /run/superagent-secrets/uat.json
+fi
 
 # Use exactly the agent identity supplied by the token; never interactive login.
 /usr/local/bin/gh-agent api user --jq .login > /dev/null || {

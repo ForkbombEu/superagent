@@ -155,3 +155,9 @@ def spec_hash(spec, environment):
     """Full SHA-256 of the canonical JSON form (sorted keys, no spaces, UTF-8)."""
     data = json.dumps(canonical(spec, environment), sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+
+def from_canonical(data):
+    """The READY spec of a canonical form (the snapshot the controller passes between jobs)."""
+    return Spec(READY, environment=data['environment'], preamble=data['preamble'],
+                scenarios=tuple(Scenario(s['id'], s['title'], s['steps']) for s in data['scenarios']))

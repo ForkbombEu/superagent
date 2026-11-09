@@ -293,6 +293,27 @@ class BindingTest(Gate):
         self.assertTrue(self.current(SHA1, issue=7))
         self.assertTrue(self.current(SHA1), 'the pinned issue applies when the request names none')
 
+    def test_a_mistaken_first_issue_is_not_pinned(self):
+        self.gh.add_issue(8, 'Another issue.\n\n## Acceptance criteria\n- [ ] Y\n')
+        answer = self.request(issue=8)  # PR #9 closes #7 only.
+        self.assertEqual(answer['verdict'], 'FAIL')
+        self.assertIn('does not close issue #8', answer['summary'])
+        self.assertIsNone(self.gate.one('SELECT issue FROM origins'), 'a failed first request pins nothing')
+        self.assertEqual(self.run_to_end_for(issue=7)['verdict'], 'PASS')
+        self.assertEqual(self.gate.one('SELECT issue FROM origins')['issue'], 7)
+        with self.assertRaisesRegex(gate.Refused, 'bound to issue #7'):
+            self.request(issue=8)
+
+    def test_an_unrelated_issue_cannot_replace_the_one_with_uat(self):
+        self.gh.add_issue(10, ISSUE)
+        self.gh.add_issue(20, 'Fix the typo.\n\n## Acceptance criteria\n- [ ] no typo\n')
+        self.gh.add_pr(11, SHA2, closes=[10, 20])
+        self.verdicts[SHA2] = 'FAIL'
+        run = self.request(pr=11, issue=20)  # The worker names #20, which has no UAT: #10's still runs.
+        self.assertEqual((run['state'], run['issue']), ('QUEUED', 10))
+        self.drain()
+        self.assertFalse(self.current(SHA2, pr=11, issue=20))
+
     def run_to_end_for(self, issue):
         run = self.request(issue=issue)
         self.drain()

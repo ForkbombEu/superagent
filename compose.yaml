@@ -35,7 +35,8 @@ services:
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
       # Optional user acceptance tests (README "User acceptance tests"): true adds
       # the UAT step to the Delivery requirements and gives the worker uat-test,
-      # which only *requests* runs from uat-gate with the shared token.
+      # which only *requests* runs from uat-gate with the shared token. The
+      # uat-gate and uat-runner services start only with COMPOSE_PROFILES=uat.
       SUPERAGENT_UAT_ENABLED: ${SUPERAGENT_UAT_ENABLED:-false}
       SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
       SUPERAGENT_UAT_GATE_URL: ${SUPERAGENT_UAT_GATE_URL:-http://uat-gate:8090}
@@ -76,7 +77,9 @@ services:
   # what each run is bound to from GitHub (read access only), drives uat-runner
   # and keeps the verdicts. It runs no pull request code and writes nothing on
   # GitHub. Without SUPERAGENT_UAT_GATE_TOKEN it answers 503 and does nothing.
+  # Like uat-runner, it starts only with COMPOSE_PROFILES=uat (README "Setup").
   uat-gate:
+    profiles: [uat]
     build:
       context: .
       dockerfile: uat/gate/Dockerfile
@@ -124,6 +127,7 @@ services:
   # capability-less containers; it has no host Docker socket, no host paths and
   # is not on the network of superagent and the dashboard.
   uat-runner:
+    profiles: [uat]
     image: docker:29-dind
     privileged: true
     restart: unless-stopped

@@ -55,7 +55,8 @@ Configure Environment Variables:
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token` |
 | `SUPERAGENT_REVIEWER_MODEL` | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses Claude Code's default for the account |
 | `SUPERAGENT_REVIEWER_EFFORT` | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`) |
-| `SUPERAGENT_UAT_ENABLED` | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` service; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
+| `SUPERAGENT_UAT_ENABLED` | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` and `uat-runner` services, which start only with `COMPOSE_PROFILES=uat`; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
+| `COMPOSE_PROFILES` | Optional. `uat` starts the UAT services (`uat-gate`, and the privileged `uat-runner`); leave it unset while UAT is off. Set it together with `SUPERAGENT_UAT_ENABLED=true` |
 | `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` |
 | `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official` |
 | `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` |
@@ -315,8 +316,10 @@ title, every required CI check passed, no review requesting changes, and
   request names a repository, PR and head SHA and, when the ticket started from
   an issue, that issue (`uat-test` takes it from DSH's
   `DSH_SUPERAGENT_GITHUB_NUMBER`), and nothing else. The gate pins that issue to
-  the PR on the first request and refuses another one later; the PR must close
-  it, so rewriting `Closes #<n>` cannot swap its UAT for another issue's. The
+  the PR once it is bound (it exists, is not a pull request and the PR closes
+  it; a request naming another issue first gets `FAIL` and pins nothing) and
+  then refuses any other; the PR must keep closing it, so rewriting
+  `Closes #<n>` cannot swap its UAT for another issue's. The
   gate re-reads everything the run is bound to from GitHub (the PR head, the
   issues its `Closes #<n>` lines name, the spec hash, `.superagent/uat.yaml`) and
   checks it against its own policy. It runs no pull request code, and its GitHub token
@@ -351,11 +354,15 @@ scenarios as data. A run passes only when DSH completed its turn, the final
 answer is a [result](uat/result.schema.json) that repeats the trusted
 metadata, covers exactly the spec's scenarios and cites evidence files that
 the tester's executed commands produced in a fresh directory
-([`uat/result.py`](uat/result.py)): every cited file named by a command that
-ran, at least one of each scenario's files captured from the application (its
-URL, or its log under `/app-logs/`), and every HTTP status the scenario reports
-present in its own cited responses. Anything else (timeout, crash, malformed
-answer, missing or unrelated evidence, a PASS without executed commands) is `BLOCKED`.
+([`uat/result.py`](uat/result.py)): every cited file written by a completed
+`curl` or `chromium` command that addresses only the application (to the file
+itself or through a `tee`), or copied from its log under `/app-logs/`, and by
+no other command (no `echo`, `sed` or script, comments ignored as the shell
+ignores them); and every HTTP status the scenario reports (`HTTP 201`,
+`404 Not Found`; not quantities such as `500 records`) in the status lines of
+its own cited responses. Anything else (timeout, crash, malformed answer,
+missing, fabricated or unrelated evidence, a PASS without executed commands)
+is `BLOCKED`.
 DSH's own transient model errors are retried once.
 
 | Verdict | `uat-test` | Merge | Counts as a failing round |
@@ -379,13 +386,18 @@ from the repository's `.superagent/uat.yaml` ([schema](uat/config.schema.json)):
 internal network whose only exit is an [allowlisting proxy](uat/proxy.py)
 that admits the model API alone; the tester shares the application's network
 namespace, so `ready: http://127.0.0.1:<port>/…` works for both. Setup and the
-application run in a writable copy of the checkout: after setup, any tracked
-file it changed is put back as committed (and listed in `setup.log`), while
-untracked output such as dependencies and builds stays; a tracked file changed
-while the application was tested turns a pass into `FAIL`. The tester reads the
-untouched checkout. Containers
-are removed after the run, when a newer head replaces it, and on gate
-restarts. The application must run entirely inside its container (no Docker,
+application run as their own unprivileged uid in a copy of the checkout whose
+committed files belong to the gate and are read-only, in directories where
+anyone may add files but only the owner may delete or rename them: they can
+install dependencies and build anywhere, but cannot change, delete or replace
+a committed file, so nothing they build or run comes from altered source (a
+setup that tries fails, and the check after setup and after the test turns
+any changed committed file into `FAIL`). The tester reads the untouched
+checkout. Every container, network and volume of a run carries the label
+`superagent-uat.run=<run>`; they are removed by that label, tester attempts
+included, after the run, when a newer head replaces it, before the run is
+retried, and on gate restarts. The application must run entirely inside its
+container (no Docker,
 no outside services at run time).
 
 ### Preview environment
@@ -412,16 +424,30 @@ production.
 
 ### Setup
 
-1. In Coolify, set `SUPERAGENT_UAT_ENABLED=true`, `SUPERAGENT_UAT_GATE_TOKEN`
+1. In Coolify > Environment Variables, set `COMPOSE_PROFILES=uat` (Docker
+   Compose reads it from the environment file Coolify deploys with, and starts
+   `uat-gate` and `uat-runner`, which have `profiles: [uat]`),
+   `SUPERAGENT_UAT_ENABLED=true`, `SUPERAGENT_UAT_GATE_TOKEN`
    (`openssl rand -hex 32`) and the policy variables you need
    ([`.env.example`](.env.example)); optionally `SUPERAGENT_UAT_GITHUB_TOKEN`, a
    fine-grained token with read access to the repository's contents, issues and
    pull requests, so the gate does not use the agent's `GH_TOKEN`. Redeploy: the
    Delivery requirements gain the UAT step and the worker gets `uat-test`.
-2. Coolify must allow the privileged `uat-runner`; without it, every UAT run
+2. Check the deployment log, or Coolify's service list: `uat-gate` and
+   `uat-runner` must be running. Without `COMPOSE_PROFILES=uat` only
+   `superagent` and `dashboard` start, and with `SUPERAGENT_UAT_ENABLED=true`
+   every `uat-test` then ends without a verdict and nothing merges.
+3. Coolify must allow the privileged `uat-runner`; without it, every UAT run
    ends `BLOCKED` (the runner is unavailable) and nothing merges.
-3. Keep the required CI checks in branch protection as they are. Do not
+4. Keep the required CI checks in branch protection as they are. Do not
    require a `superagent/uat` check: nothing publishes it.
+
+To turn UAT off, set `SUPERAGENT_UAT_ENABLED=false`, remove `COMPOSE_PROFILES`
+and redeploy, then stop the `uat-gate` and `uat-runner` containers that are
+still running (Compose leaves services of an inactive profile alone:
+`docker compose --profile uat stop uat-gate uat-runner`). Their volumes keep
+the gate's runs and failure budgets for a later re-enable. A deployment that
+had UAT on before this change adds `COMPOSE_PROFILES=uat` when it updates.
 
 ### Moving from the GitHub App version
 
@@ -467,6 +493,16 @@ unmergeable. Before enabling this version:
 - The UAT verdict, like the Claude Code review, is enforced by the Delivery
   requirements and by `claude-review`'s own check, not by GitHub: a worker that
   ignored them could merge without UAT. Branch protection still enforces CI.
+- The issue a ticket started from reaches the gate only through the worker's
+  request (`DSH_SUPERAGENT_GITHUB_NUMBER`): DSH keeps it in its own state
+  database and management API, both writable by the worker's user, and posts
+  on GitHub with the same token the worker holds, so nothing the gate can read
+  records it beyond the worker's reach. Once pinned it cannot change, but a
+  worker that leaves it out of its first request, and edits `Closes #<n>` to
+  an issue without UAT, is tested against that issue alone; the original issue
+  then stays open after the merge. Binding it authoritatively needs DSH itself
+  to publish the ticket's origin where the worker cannot write, a deferred
+  improvement together with GitHub-enforced merges.
 - The tester is a model: hostile output from the application could mislead
   it. The evidence rules stop answers without executed commands or evidence,
   not a tester convinced by a lying application.

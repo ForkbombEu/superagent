@@ -107,7 +107,8 @@ def git_commit(directory):
 
 
 class TreeTest(unittest.TestCase):
-    """uat/sandbox/tree.py, which keeps a PASS about the committed source (here on the host, in the gate a container)."""
+    """uat/sandbox/tree.py, the check that a working copy still holds the commit (here on the host, in the gate
+    a container), and sandbox.seal, which keeps it so."""
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
@@ -122,18 +123,18 @@ class TreeTest(unittest.TestCase):
         git_commit(self.pristine)
         shutil.copytree(self.pristine, self.work, symlinks=True)
 
-    def tree(self, *args):
+    def tree(self):
         answer = subprocess.run([sys.executable, os.path.join(REPOSITORY, 'uat', 'sandbox', 'tree.py'), self.pristine,
-                                 self.work, *args], capture_output=True, text=True, check=True)
-        return json.loads(answer.stdout)
+                                 self.work], capture_output=True, text=True, check=True)
+        return json.loads(answer.stdout)['changed']
 
     def test_untracked_output_is_not_a_change(self):
         os.makedirs(os.path.join(self.work, 'node_modules', 'x'))
         with open(os.path.join(self.work, 'build.out'), 'w') as file:
             file.write('built')
-        self.assertEqual(self.tree(), {'changed': [], 'unrestored': []})
+        self.assertEqual(self.tree(), [])
 
-    def test_tracked_changes_are_found_and_restored(self):
+    def test_tracked_changes_are_found(self):
         with open(os.path.join(self.work, 'server.py'), 'a') as file:
             file.write('patched\n')
         os.remove(os.path.join(self.work, 'run.sh'))
@@ -141,16 +142,24 @@ class TreeTest(unittest.TestCase):
         os.symlink('/etc/passwd', os.path.join(self.work, 'link'))
         shutil.rmtree(os.path.join(self.work, 'src'))
         os.symlink('/etc', os.path.join(self.work, 'src'))
-        self.assertEqual(sorted(self.tree()['changed']), ['link', 'run.sh', 'server.py', 'src/app.py'])
-        self.assertEqual(self.tree('--restore')['unrestored'], [])
-        self.assertEqual(self.tree(), {'changed': [], 'unrestored': []})
-        self.assertEqual(os.readlink(os.path.join(self.work, 'link')), 'server.py')
-        self.assertTrue(os.access(os.path.join(self.work, 'run.sh'), os.X_OK))
-        self.assertFalse(os.path.islink(os.path.join(self.work, 'src')))
+        self.assertEqual(sorted(self.tree()), ['link', 'run.sh', 'server.py', 'src/app.py'])
 
     def test_exec_bit_is_part_of_the_source(self):
         os.chmod(os.path.join(self.work, 'server.py'), 0o755)
-        self.assertEqual(self.tree()['changed'], ['server.py'])
+        self.assertEqual(self.tree(), ['server.py'])
+
+    def test_seal_keeps_modes_and_never_follows_links(self):
+        outside = os.path.join(self.root, 'outside')
+        with open(outside, 'w') as file:
+            file.write('gate file')
+        os.chmod(outside, 0o600)
+        os.symlink(outside, os.path.join(self.work, 'escape'))
+        sandbox.seal(self.work)
+        self.assertEqual(os.stat(outside).st_mode & 0o7777, 0o600)
+        self.assertEqual(os.stat(os.path.join(self.work, 'src')).st_mode & 0o7777, 0o1777)
+        self.assertEqual(os.stat(os.path.join(self.work, 'server.py')).st_mode & 0o777, 0o444)
+        self.assertEqual(os.stat(os.path.join(self.work, 'run.sh')).st_mode & 0o777, 0o555)
+        self.assertEqual(self.tree(), [])
 
 
 def result(meta, verdict, uat2='PASS', observed2='HTTP 400, no record', uat1='PASS', observed1='201, 200'):
@@ -317,25 +326,37 @@ class LocalSandboxTest(unittest.TestCase):
     def test_setup_cannot_change_the_tested_source(self):
         config = ('version: 1\nenvironments:\n  local:\n    type: local\n    setup: rm force-500 && echo built > build.out\n'
                   '    start: python3 server.py 3000\n    ready: http://127.0.0.1:3000/health\n')
-        steps = self.passing_steps()
-        steps[-1] = {'final': failing(9)}
-        self.script(steps)
+        self.script(self.passing_steps())
         checkout = self.checkout(force_500=True, config=config)
         outcome, out = self.run_local(checkout)
         self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
-        with open(os.path.join(out, 'app-logs', 'app.log')) as file:
-            self.assertIn('POST /records -> 500', file.read(), 'the committed force-500 is what ran')
-        with open(os.path.join(out, 'setup.log')) as file:
-            self.assertRegex(file.read(), 'setup changed tracked files, restored to commit .*: force-500')
+        self.assertRegex(outcome.reasons[0], r'(?s)exited with status 1 \(committed files are read-only.*'
+                                             r'(Permission denied|Operation not permitted)')
         self.assertTrue(os.path.exists(os.path.join(checkout, 'force-500')))
 
-    def test_application_changing_tracked_files_cannot_pass(self):
-        config = ('version: 1\nenvironments:\n  local:\n    type: local\n'
-                  '    start: echo >> server.py && exec python3 server.py 3000\n    ready: http://127.0.0.1:3000/health\n')
+    def test_setup_cannot_build_an_artifact_from_altered_source(self):
+        # Alter the source, build from it, put the source back: the run would test code that is not the commit.
+        setup = ('cp server.py /tmp/committed.py; sed -i s/force-500/no-such-file/ server.py; cp server.py built.py; '
+                 'cp /tmp/committed.py server.py; true')
+        config = (f'version: 1\nenvironments:\n  local:\n    type: local\n    setup: {setup}\n'
+                  '    start: python3 built.py 3000\n    ready: http://127.0.0.1:3000/health\n')
         self.script(self.passing_steps())
-        outcome, _ = self.run_local(self.checkout(config=config))
-        self.assertEqual(outcome.verdict, 'FAIL')
-        self.assertRegex(outcome.reasons[0], r'changed tracked files while it was tested \(server.py\)')
+        outcome, out = self.run_local(self.checkout(force_500=True, config=config))
+        self.assertNotEqual(outcome.verdict, 'PASS', outcome.reasons)
+        with open(os.path.join(out, 'setup.log')) as file:
+            self.assertIn('Permission denied', file.read())
+        with open(os.path.join(out, 'app-logs', 'app.log')) as file:
+            self.assertIn('POST /records -> 500', file.read(), 'the artifact was built from the committed source')
+
+    def test_application_cannot_change_tracked_files(self):
+        config = ('version: 1\nenvironments:\n  local:\n    type: local\n'
+                  '    start: echo patched >> server.py; exec python3 server.py 3000\n'
+                  '    ready: http://127.0.0.1:3000/health\n')
+        self.script(self.passing_steps())
+        outcome, out = self.run_local(self.checkout(config=config))
+        self.assertEqual(outcome.verdict, 'PASS', outcome.reasons)  # The commit is what ran.
+        with open(os.path.join(out, 'app-logs', 'app.log')) as file:
+            self.assertIn('Permission denied', file.read())
 
     def test_setup_failure_fails_with_its_log(self):
         config = ('version: 1\nenvironments:\n  local:\n    type: local\n    setup: echo dependency missing; exit 3\n'

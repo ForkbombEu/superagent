@@ -39,6 +39,9 @@ SETUP_SCRIPT = ('set -eu; if [ -f mise.toml ] || [ -f .mise.toml ] || [ -f .tool
                 'if [ -n "${UAT_SETUP:-}" ]; then sh -c "$UAT_SETUP"; fi')
 LIMITS = ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '2048', '--memory', '6g',
           '--cpus', '2']
+# Setup and the application run as this uid, never the gate's, so that the committed files of their working
+# copy, owned by the gate and sealed (seal), stay as committed; containers drop every capability.
+UNTRUSTED_USER = '10021:10021'
 
 
 @dataclass
@@ -143,20 +146,32 @@ def start_proxy(settings, extra_allow=()):
     """The allowlisting proxy on `<p>-egress`, also joined to `<p>-internal` and settings.proxy_networks."""
     p = settings.prefix
     allowed = [item for host in (*settings.allow, *extra_allow) for item in ('--allow', host)]
-    docker('run', '-d', '--name', f'{p}-proxy', '--network', f'{p}-egress', *LIMITS, settings.tester_image,
+    docker('run', '-d', '--name', f'{p}-proxy', *run.owner(p), '--network', f'{p}-egress', *LIMITS, settings.tester_image,
            'python3', '/usr/local/lib/superagent-uat/proxy.py', *allowed)
     for network in (f'{p}-internal', *settings.proxy_networks):
         docker('network', 'connect', network, f'{p}-proxy')
 
 
-def check_tree(settings, checkout, workspace, restore):
-    """Compare the working copy's tracked files with the commit, in a throwaway container without network;
-    restore them when asked. {"changed": [...], "unrestored": [...]}."""
-    answer = docker('run', '--rm', '--network', 'none', '--user', f'{os.getuid()}:{os.getgid()}', *LIMITS,
-                    '-v', f'{checkout}:/pristine:ro', '-v', f'{workspace}:/workspace{"" if restore else ":ro"}',
-                    '--entrypoint', 'python3', settings.sandbox_image, '/usr/local/lib/superagent-uat/tree.py',
-                    '/pristine', '/workspace', *(['--restore'] if restore else []), timeout=600)
-    return json.loads(answer.stdout)
+def check_tree(settings, checkout, workspace):
+    """The tracked files the working copy no longer has as committed, compared in a throwaway container
+    without network (the working copy may hold symbolic links anywhere)."""
+    answer = docker('run', '--rm', *run.owner(settings.prefix), '--network', 'none',
+                    '--user', f'{os.getuid()}:{os.getgid()}', *LIMITS, '-v', f'{checkout}:/pristine:ro',
+                    '-v', f'{workspace}:/workspace:ro', '--entrypoint', 'python3', settings.sandbox_image,
+                    '/usr/local/lib/superagent-uat/tree.py', '/pristine', '/workspace', timeout=600)
+    return json.loads(answer.stdout)['changed']
+
+
+def seal(workspace):
+    """Make the committed files of a fresh working copy immutable to UNTRUSTED_USER, who still creates files
+    anywhere: every file read-only and owned by the gate, every directory sticky and world-writable, so
+    that only the gate may write, delete or rename what the commit holds (symbolic links included)."""
+    for root, directories, files in os.walk(workspace):
+        os.chmod(root, 0o1777)
+        for name in files:
+            path = os.path.join(root, name)
+            if not os.path.islink(path):
+                os.chmod(path, (os.lstat(path).st_mode & 0o555) | 0o444)
 
 
 def listed(paths, limit=10):
@@ -166,44 +181,47 @@ def listed(paths, limit=10):
 def run_local(meta, spec, checkout, entry, settings, out_dir):
     """The Outcome of testing the checkout's local environment `entry`; artifacts stay in out_dir.
 
-    The checkout stays exactly the commit: setup and the application run in a writable copy of it, whose
-    tracked files are restored to the commit after setup (dependency and build output, untracked, stay) and
-    compared with it after the test, so a PASS always describes the committed source."""
+    The checkout stays exactly the commit, for the tester. Setup and the application run as
+    UNTRUSTED_USER in a sealed copy of it: they may add files (dependencies, build output) but cannot
+    change a committed one, so nothing they build or run comes from altered source. The copy's tracked
+    files are compared with the commit after setup and after the test as well: any change is a FAIL."""
     p, environment = settings.prefix, dict(os.environ if settings.environment is None else settings.environment)
-    user = ['--user', f'{os.getuid()}:{os.getgid()}']
+    user, untrusted = ['--user', f'{os.getuid()}:{os.getgid()}'], ['--user', UNTRUSTED_USER]
+    if UNTRUSTED_USER.split(':')[0] == str(os.getuid()):
+        raise RuntimeError(f'the gate must not run as the sandbox user {UNTRUSTED_USER}')
     workspace = checkout.rstrip('/') + '.workspace'
     shutil.copytree(checkout, workspace, symlinks=True)
+    seal(workspace)
     mounts = ['-v', f'{workspace}:/workspace', '-v', f'{p}-home:/home/sandbox']
     logs = os.path.join(out_dir, 'app-logs')
     os.makedirs(logs)
     os.chmod(logs, 0o777)
     try:
-        docker('network', 'create', f'{p}-egress')
-        docker('network', 'create', '--internal', f'{p}-internal')
-        docker('volume', 'create', f'{p}-home')
+        remove(p)  # What a run of the same prefix left behind, if a gate died during it.
+        docker('network', 'create', *run.owner(p), f'{p}-egress')
+        docker('network', 'create', *run.owner(p), '--internal', f'{p}-internal')
+        docker('volume', 'create', *run.owner(p), f'{p}-home')
         setup_log = os.path.join(out_dir, 'setup.log')
         code, timed_out = run_logged(
-            ['docker', 'run', '--rm', '--name', f'{p}-setup', '--network', f'{p}-egress', *user, *LIMITS, *mounts,
-             '-e', f'UAT_SETUP={entry.get("setup", "")}', settings.sandbox_image, 'sh', '-c', SETUP_SCRIPT],
+            ['docker', 'run', '--rm', '--name', f'{p}-setup', *run.owner(p), '--network', f'{p}-egress', *untrusted,
+             *LIMITS, *mounts, '-e', f'UAT_SETUP={entry.get("setup", "")}', settings.sandbox_image, 'sh', '-c',
+             SETUP_SCRIPT],
             setup_log, settings.setup_timeout, environment)
         if timed_out or code:
             reason = f'did not finish within {settings.setup_timeout} s' if timed_out else f'exited with status {code}'
-            return results.Outcome(results.FAIL, [f'the sandbox setup ({entry.get("setup") or "mise install"}) {reason}; '
-                                                  f'last output:\n{tail(setup_log)}'])
-        tree = check_tree(settings, checkout, workspace, restore=True)
-        if tree['changed']:
-            with open(setup_log, 'a', encoding='utf-8') as log:
-                log.write(f'\nsuperagent-uat: setup changed tracked files, restored to commit {meta["head_sha"]}: '
-                          f'{listed(tree["changed"])}\n')
-        if tree['unrestored']:
-            return results.Outcome(results.FAIL, [f'the sandbox setup changed tracked files that could not be restored '
-                                                  f'to commit {meta["head_sha"]}: {listed(tree["unrestored"])}'])
+            return results.Outcome(results.FAIL, [f'the sandbox setup ({entry.get("setup") or "mise install"}) {reason} '
+                                                  '(committed files are read-only to it: write generated files '
+                                                  f'elsewhere); last output:\n{tail(setup_log)}'])
+        changed = check_tree(settings, checkout, workspace)
+        if changed:
+            return results.Outcome(results.FAIL, [f'the sandbox setup changed committed files ({listed(changed)}): '
+                                                  f'what it built would not be commit {meta["head_sha"]}'])
         start_proxy(settings)
-        docker('run', '-d', '--name', f'{p}-pod', '--network', f'{p}-internal', *user, *LIMITS,
+        docker('run', '-d', '--name', f'{p}-pod', *run.owner(p), '--network', f'{p}-internal', *user, *LIMITS,
                settings.sandbox_image, 'sleep', 'infinity')
-        docker('run', '-d', '--init', '--name', f'{p}-app', '--network', f'container:{p}-pod', *user, *LIMITS, *mounts,
-               '-v', f'{logs}:/uat-logs', '-e', f'UAT_START={entry["start"]}', settings.sandbox_image,
-               'sh', '-c', 'exec sh -c "$UAT_START" > /uat-logs/app.log 2>&1')
+        docker('run', '-d', '--init', '--name', f'{p}-app', *run.owner(p), '--network', f'container:{p}-pod',
+               *untrusted, *LIMITS, *mounts, '-v', f'{logs}:/uat-logs', '-e', f'UAT_START={entry["start"]}',
+               settings.sandbox_image, 'sh', '-c', 'exec sh -c "$UAT_START" > /uat-logs/app.log 2>&1')
         problem = wait_ready(p, entry['ready'], settings.ready_timeout)
         if problem:
             return results.Outcome(results.FAIL, [f'{problem}; application output:\n{tail(os.path.join(logs, "app.log"))}'])
@@ -213,7 +231,7 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
                              out_dir=os.path.join(out_dir, 'tester'), base_url=f'http://{url.netloc}',
                              repo_dir=checkout, timeout=settings.tester_timeout, environment=environment,
                              name_prefix=p, extra_mounts=['-v', f'{logs}:/app-logs:ro'])
-        changed = check_tree(settings, checkout, workspace, restore=False)['changed']
+        changed = check_tree(settings, checkout, workspace)
         if changed and outcome.verdict == results.PASS:
             outcome = results.Outcome(results.FAIL, [
                 f'the application changed tracked files while it was tested ({listed(changed)}), so the result does '
@@ -233,15 +251,31 @@ def run_local(meta, spec, checkout, entry, settings, out_dir):
 
 
 def remove(prefix, out_dir=None):
-    """Remove every container, network and volume of a run; keep the proxy's decisions first."""
+    """Remove every container, network and volume of a run (labeled run.owner(prefix)), whichever step made
+    it, tester attempts included; keep the proxy's decisions first. Containers go first, so that networks
+    and the volume are free. Safe to repeat, and after a partial failure or a dead gate."""
     if out_dir:
         with open(os.path.join(out_dir, 'proxy.log'), 'w') as log:
             subprocess.run(['docker', 'logs', f'{prefix}-proxy'], stdout=log, stderr=subprocess.STDOUT, check=False)
-    for name in ('app', 'pod', 'proxy', 'setup'):
-        subprocess.run(['docker', 'rm', '-f', f'{prefix}-{name}'], capture_output=True)
-    for network in ('internal', 'egress'):
-        subprocess.run(['docker', 'network', 'rm', f'{prefix}-{network}'], capture_output=True)
-    subprocess.run(['docker', 'volume', 'rm', '-f', f'{prefix}-home'], capture_output=True)
+    selector = ['--filter', f'label={run.LABEL}={prefix}']
+    for listing, removal in ((['ps', '-aq'], ['rm', '-f']), (['network', 'ls', '-q'], ['network', 'rm']),
+                             (['volume', 'ls', '-q'], ['volume', 'rm', '-f'])):
+        ids = subprocess.run(['docker', *listing, *selector], capture_output=True, text=True).stdout.split()
+        if ids:
+            subprocess.run(['docker', *removal, *ids], capture_output=True)
+
+
+def owners():
+    """The run prefixes that own containers, networks or volumes on the runner (empty when it is unreachable)."""
+    found = set()
+    for listing in (['ps', '-a'], ['network', 'ls'], ['volume', 'ls']):
+        try:
+            answer = subprocess.run(['docker', *listing, '--filter', f'label={run.LABEL}', '--format',
+                                     f'{{{{.Label "{run.LABEL}"}}}}'], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        found |= set(answer.stdout.split()) if answer.returncode == 0 else set()
+    return found
 
 
 def prune(directory, limit=MAX_UPLOAD_BYTES):

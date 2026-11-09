@@ -136,13 +136,16 @@ class Gate:
 
     def binding(self, repository, pr, issue):
         """The PR's current binding (controller.derive) for the issue its ticket started from: the one pinned
-        for the PR, which the first verified request names and no later request can change."""
+        for the PR, else the one the request names. An issue is pinned only once bound (an issue of the
+        repository that the PR closes), so a mistaken first request pins nothing, and no later request can
+        change it. A request that names no issue, while none is pinned, is bound by `Closes` lines alone: the
+        gate cannot learn a ticket's issue from anything the worker could not alter (README, Limits)."""
         row = self.one('SELECT issue FROM origins WHERE repository = ? AND pr = ?', repository, pr)
         if row and issue is not None and issue != row['issue']:
             raise Refused(409, f'PR #{pr} is bound to issue #{row["issue"]}, which its ticket started from, not #{issue}')
         origin = row['issue'] if row else issue
         found = controller.derive(self.ctx, pr, origin)
-        if not row and found['origin_checked']:
+        if not row and found['origin_bound']:
             self.query('INSERT INTO origins VALUES (?, ?, ?)', repository, pr, origin)
         return found
 
@@ -271,9 +274,14 @@ class Gate:
             self.raise_budget(row['repository'], row['pr'], failed)
 
     def recover(self):
-        """After a gate restart: runs left RUNNING lost their process. Re-run each once; then BLOCKED."""
+        """After a gate restart: runs left RUNNING lost their process. Re-run each once; then BLOCKED.
+
+        Whatever any run of this gate left on the runner goes first (tester attempts included), found by its
+        label: nothing runs now, and a superseded run may have been mid-way too."""
+        mine = {f'superagent-uat-{row["id"]}' for row in self.query('SELECT id FROM runs')}
+        for prefix in sandbox.owners() & mine:
+            sandbox.remove(prefix)
         for row in self.query("SELECT * FROM runs WHERE state = 'RUNNING'"):
-            sandbox.remove(f'superagent-uat-{row["id"]}')
             remove_dir(os.path.join(self.work_dir, row['id']))
             if row['attempts'] < 2:
                 self.query("UPDATE runs SET state = 'QUEUED', updated = ? WHERE id = ?", time.time(), row['id'])

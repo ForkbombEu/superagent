@@ -6,12 +6,16 @@ sample application stand in for DeepSeek and the pull request.
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 from uat import controller, gate
 from uat.tests import docker_support as ds
+from uat.tests import fake_github as fg
 from uat.tests.test_dsh_tester import INVALID
 from uat.tests.test_gate import CONFIG, Gate
 from uat.tests.test_sandbox import FIXTURE, TESTS, result
@@ -60,25 +64,86 @@ class RunnerGate(Gate):
         self.gh.add_pr(9, self.sha, closes=[7])
         self.gh.contents[('.superagent/uat.yaml', self.sha)] = CONFIG
 
-    def run_gate(self, steps, **policy):
-        """Request a run of the head, script the model with the run's own metadata, run it; (run, kept files)."""
-        self.gate = self.make_gate(
-            executor=gate.Runner('ghs_checkout_token_123456', f'file://{self.server}'),
-            DEEPSEEK_API_KEY='sk-pipeline-secret-key', DEEPSEEK_BASE_URL=f'http://{self.network}-mock:8080',
-            SUPERAGENT_UAT_PROXY_NETWORKS=self.network, SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES='3', **policy)
-        run = self.request()
-        self.assertEqual(run['state'], 'QUEUED', run)
-        meta = json.loads(self.gate.one('SELECT snapshot FROM runs WHERE id = ?', run['run_id'])['snapshot'])['meta']
+    def policy(self, **policy):
+        return dict(DEEPSEEK_API_KEY='sk-pipeline-secret-key', DEEPSEEK_BASE_URL=f'http://{self.network}-mock:8080',
+                    SUPERAGENT_UAT_PROXY_NETWORKS=self.network, SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES='3', **policy)
+
+    def runner_gate(self, **policy):
+        return self.make_gate(executor=gate.Runner('ghs_checkout_token_123456', f'file://{self.server}'),
+                              **self.policy(**policy))
+
+    def script(self, run_id, steps):
+        """Script the model; a final 'RESULT' becomes a passing result with the run's own metadata (citing the
+        application's log only when a step copies it: a preview has none)."""
+        meta = json.loads(self.gate.one('SELECT snapshot FROM runs WHERE id = ?', run_id)['snapshot'])['meta']
         if steps[-1].get('final') == 'RESULT':
             steps[-1]['final'] = result(meta, 'PASS').replace(
                 'HTTP 400, no record', 'HTTP 400 for credentials long-enough-preview-secret')
+            if not any('/app-logs/' in step.get('bash', '') for step in steps):
+                steps[-1]['final'] = steps[-1]['final'].replace(', "artifacts/app.log"', '')
         with open(os.path.join(self.model_dir, 'script.json'), 'w') as file:
             json.dump({'steps': steps}, file)
+
+    def run_gate(self, steps, **policy):
+        """Request a run of the head, script the model with the run's own metadata, run it; (run, kept files)."""
+        self.gate = self.runner_gate(**policy)
+        run = self.request()
+        self.assertEqual(run['state'], 'QUEUED', run)
+        self.script(run['run_id'], steps)
         self.drain()
         self.assertEqual(ds.leftovers(f'superagent-uat-{run["run_id"]}-'), [])
         self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', run['run_id'])))
         run = self.gate.view(self.gate.one('SELECT * FROM runs WHERE id = ?', run['run_id']))
         return run, os.path.join(self.state, 'runs', run['run_id'])
+
+
+# A gate process that claims and runs the queued run, to be killed while its tester runs.
+GATE_PROCESS = '''
+import json, sys
+from uat import controller, gate
+from uat.github import GitHub
+a = json.loads(sys.argv[1])
+ctx = controller.Context(a['repository'], GitHub(a['token'], a['github']), controller.Policy(a['policy']))
+g = gate.Gate(ctx, a['state'], a['work'], executor=gate.Runner('ghs_checkout_token_123456', a['server']))
+g.process(g.claim())
+'''
+
+
+class RestartTest(RunnerGate):
+    def test_gate_restart_while_the_tester_runs_recovers_the_run_and_leaves_nothing(self):
+        self.gate = self.runner_gate()
+        run = self.request()
+        prefix = f'superagent-uat-{run["run_id"]}-'
+        self.script(run['run_id'], [{'sleep': 600, 'final': '{}'}])
+        arguments = {'repository': self.gh.repository, 'token': fg.GATE_TOKEN, 'github': self.gh.url,
+                     'policy': self.policy(), 'state': self.state, 'work': os.path.join(self.dir, 'work'),
+                     'server': f'file://{self.server}'}
+        root = os.path.dirname(os.path.dirname(TESTS))
+        with open(os.path.join(self.dir, 'gate.log'), 'wb') as log:
+            dying = subprocess.Popen([sys.executable, '-c', GATE_PROCESS, json.dumps(arguments)], cwd=root,
+                                     env={**os.environ, 'PYTHONPATH': root}, stdout=log, stderr=log,
+                                     start_new_session=True)
+        deadline = time.monotonic() + 600
+        while f'container {prefix}tester-1' not in ds.leftovers(prefix):
+            self.assertIsNone(dying.poll(), 'the gate finished before its tester started')
+            self.assertLess(time.monotonic(), deadline, 'the tester never started')
+            time.sleep(2)
+        os.killpg(dying.pid, signal.SIGKILL)  # The gate container restarts; the runner keeps its containers.
+        dying.wait()
+        self.assertIn(f'container {prefix}tester-1', ds.leftovers(prefix))
+
+        self.gate = self.runner_gate()
+        self.gate.recover()
+        self.assertEqual(ds.leftovers(prefix), [])
+        row = self.gate.one('SELECT state, attempts FROM runs WHERE id = ?', run['run_id'])
+        self.assertEqual((row['state'], row['attempts']), ('QUEUED', 1))
+        self.script(run['run_id'], [{'bash': CREATE.replace('{origin}', 'http://127.0.0.1:3000')}, {'bash': INVALID},
+                                    {'bash': 'cp /app-logs/app.log artifacts/app.log'}, {'final': 'RESULT'}])
+        self.drain()
+        self.assertEqual(ds.leftovers(prefix), [])
+        again = self.gate.view(self.gate.one('SELECT * FROM runs WHERE id = ?', run['run_id']))
+        self.assertEqual(again['verdict'], 'PASS', again)
+        self.assertTrue(self.gate.verify(self.gh.repository, 9, self.sha)['current'])
 
 
 class LocalPipelineTest(RunnerGate):
@@ -133,7 +198,8 @@ class PreviewPipelineTest(RunnerGate):
         policy = self.deploy(self.sha)
         origin = policy['SUPERAGENT_UAT_PREVIEW_URL']
         steps = [{'bash': CREATE.replace('{origin}', origin)}, {'bash': INVALID.replace('http://127.0.0.1:3000', origin)},
-                 {'bash': 'cp /uat-credentials.json artifacts/app.log && cat /uat-credentials.json'}, {'final': 'RESULT'}]
+                 {'bash': 'cp /uat-credentials.json artifacts/credentials.txt && cat /uat-credentials.json'},
+                 {'final': 'RESULT'}]
         run, kept = self.run_gate(steps, **policy)
         self.assertEqual(run['verdict'], 'PASS', run)
         for root, _, names in os.walk(kept):

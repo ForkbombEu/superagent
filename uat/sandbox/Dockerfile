@@ -25,8 +25,9 @@ RUN set -eux; \
 # Compares the working copy's tracked files with the committed snapshot (sandbox.py).
 COPY sandbox/tree.py /usr/local/lib/superagent-uat/tree.py
 
-# The controller runs the containers as its own uid; the home (a per-run volume
-# shared by setup and start) and the checkout are writable by any uid.
+# The controller runs setup and the application as uid 10021 (sandbox.UNTRUSTED_USER),
+# in a working copy whose committed files it keeps read-only to them; the home (a
+# per-run volume shared by setup and start) is writable by any uid.
 ENV HOME=/home/sandbox \
     PATH=/home/sandbox/.local/share/mise/shims:$PATH \
     MISE_TRUSTED_CONFIG_PATHS=/workspace \

@@ -168,7 +168,11 @@ the tester runs every scenario and keeps evidence of what it saw.
   request it stops and is reported blocked, unmerged. A scenario the tester
   cannot run is reported blocked, never passed.
 - A repository that needs setup to run locally describes it in
-  `.superagent/uat.yaml` (commands run only inside the sandbox):
+  `.superagent/uat.yaml` (commands run only inside the sandbox). Setup and the
+  application may create files anywhere (dependencies, build output, data), but
+  committed files are read-only to them: a command that rewrites a committed
+  file, such as a lockfile update or a formatter, fails the run, so build into
+  untracked paths and commit lockfiles as installed:
 
   ```yaml
   version: 1

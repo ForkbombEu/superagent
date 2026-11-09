@@ -57,11 +57,20 @@ def render_prompt(meta, spec, base_url, template_path=PROMPT, kind='local', note
         return re.sub('|'.join(map(re.escape, values)), lambda match: values[match.group(0)], file.read())
 
 
-def tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts=()):
-    """`docker run` arguments for one tester attempt (the prompt goes on stdin)."""
+# Every container, network and volume of a run carries this label, valued with the run's name prefix, so
+# that sandbox.remove finds all of them (tester attempts included) and nothing of any other run or workload.
+LABEL = 'superagent-uat.run'
+
+
+def owner(prefix):
+    return ['--label', f'{LABEL}={prefix}']
+
+
+def tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts=(), prefix=None):
+    """`docker run` arguments for one tester attempt (the prompt goes on stdin), owned by run `prefix`."""
     passed = [item for key in PASSED_ENVIRONMENT if environment.get(key) for item in ('-e', key)]
     return [
-        'docker', 'run', '--rm', '-i', '--name', name, '--network', network,
+        'docker', 'run', '--rm', '-i', '--name', name, *(owner(prefix) if prefix else []), '--network', network,
         '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         # DSH loads native bindings it unpacks in /tmp: exec is required.
         '--pids-limit', '1024', '--memory', '4g', '--cpus', '2', '--tmpfs', '/tmp:rw,exec,size=1g',
@@ -110,7 +119,8 @@ def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo
         with open(os.path.join(attempt_out, 'prompt.md'), 'w', encoding='utf-8') as file:
             file.write(prompt)
         name = f'{name_prefix}-tester-{number}'
-        command = tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts)
+        command = tester_command(name, image, network, work_dir, repo_dir, proxy, environment, extra_mounts,
+                                 prefix=name_prefix)
         raw, exit_code, timed_out, started, finished = attempt(command, name, prompt, timeout, attempt_out, environment)
         outcome = results.evaluate(raw, exit_code, timed_out, meta, ids, work_dir, origins=[base_url])
         records.append({'attempt': number, 'started_at': started, 'finished_at': finished, 'exit_code': exit_code,

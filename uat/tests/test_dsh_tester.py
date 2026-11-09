@@ -115,7 +115,8 @@ class DshTesterTest(unittest.TestCase):
         fabricated = 'echo "HTTP/1.1 201 Created" > artifacts/uat-1-create.txt; echo PASS > artifacts/uat-1-get.txt'
         outcome, _, _ = self.run_script([{'bash': fabricated}, {'bash': INVALID}, {'final': self.result('PASS')}])
         self.assertEqual(outcome.verdict, 'BLOCKED')
-        self.assertIn('UAT-1: none of its evidence comes from a command that reached the application', outcome.reasons)
+        self.assertIn('UAT-1: artifacts/uat-1-create.txt is written by a command that failed or does not capture it '
+                      'from the application', outcome.reasons)
 
     def test_hallucinated_pass_without_commands(self):
         outcome, _, _ = self.run_script([{'final': self.result('PASS')}])

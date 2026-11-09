@@ -87,13 +87,14 @@ def log(message):
 def derive(ctx, number, origin=None):
     """Everything the verdict is bound to, as a dict whose `status` is READY, NOT_REQUIRED, BLOCKED, FAIL or CLOSED.
 
-    `origin` is the issue the ticket started from (DSH_SUPERAGENT_GITHUB_NUMBER), which the PR description
-    cannot replace: it must be a real issue of the repository and the PR must close it. Its UAT is tested
-    with any other issue's the PR closes; `origin_checked` says it was verified as an issue."""
+    `origin` is the issue the ticket started from (DSH_SUPERAGENT_GITHUB_NUMBER, as the worker's uat-test
+    names it: neither DSH's state nor GitHub holds a record of it the worker could not alter), which the PR
+    description cannot replace: it must be a real issue of the repository and the PR must close it. Its UAT
+    is tested with any other issue's the PR closes. `origin_bound` says both held, so the gate may pin it."""
     gh, policy = ctx.github, ctx.policy
     pr = gh.get(f'repos/{ctx.repository}/pulls/{number}')
     found = {'pr': number, 'sha': pr['head']['sha'], 'origin': origin, 'issue': None, 'environment': None,
-             'spec_sha256': None, 'origin_checked': False}
+             'spec_sha256': None, 'origin_bound': False}
     if pr['state'] != 'open':
         return {**found, 'status': 'CLOSED', 'reason': 'the pull request is not open'}
     links = gh.graphql(LINKS, owner=ctx.owner, name=ctx.name, number=number)['repository']['pullRequest']
@@ -118,11 +119,11 @@ def derive(ctx, number, origin=None):
             return verdict(BLOCKED, f'issue #{origin}, which the ticket started from, does not exist in {ctx.repository}')
         if bodies[origin].get('pull_request'):
             return verdict(BLOCKED, f'#{origin}, which the ticket started from, is a pull request, not an issue')
-        found['origin_checked'] = True
         if origin not in issues:
             return verdict(FAIL, f'the pull request does not close issue #{origin}, which its ticket started from, so '
                                  f'that issue\'s UAT would not run: name it with a `Closes #{origin}` line in its '
                                  'description', issue=origin)
+        found['origin_bound'] = True
     if not issues:
         return verdict(FAIL, 'the pull request closes no issue of this repository: name the issue it resolves '
                              'with a `Closes #<n>` line in its description')

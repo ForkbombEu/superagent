@@ -189,8 +189,9 @@ def run_preview(meta, spec, entry, settings, policy, out_dir, checkout=None):
         mounts = ['-v', f'{credentials}:/uat-credentials.json:ro']
         notes += ' Test credentials for the scenarios are in /uat-credentials.json (never put them in your answer).'
     try:
-        sandbox.docker('network', 'create', f'{p}-egress')
-        sandbox.docker('network', 'create', '--internal', f'{p}-internal')
+        sandbox.remove(p)  # What a run of the same prefix left behind, if a gate died during it.
+        sandbox.docker('network', 'create', *run.owner(p), f'{p}-egress')
+        sandbox.docker('network', 'create', *run.owner(p), '--internal', f'{p}-internal')
         sandbox.start_proxy(settings, extra_allow=(host,))
         outcome, _ = run.run(meta, spec, image=settings.tester_image, network=f'{p}-internal', proxy=f'{p}-proxy:3128',
                              work_root=os.path.join(out_dir, 'tester-work'), out_dir=os.path.join(out_dir, 'tester'),

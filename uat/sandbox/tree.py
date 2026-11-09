@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Compare, and optionally restore, a working copy's tracked files against the committed snapshot.
+"""Compare a working copy's tracked files with the committed snapshot.
 
-Usage: tree.py <pristine checkout> <working copy> [--restore]
+Usage: tree.py <pristine checkout> <working copy>
 
 Runs in a throwaway container of the sandbox image, never in the gate: the
 working copy is PR-controlled and may hold symbolic links anywhere, which
 resolve harmlessly inside this container. The tracked paths come from the
 pristine checkout's own index (`git ls-files`), which no PR code ever touched.
-Untracked files (dependencies, build output, caches) are left alone.
+Untracked files (dependencies, build output, caches) are not compared.
 
-Prints one JSON object: {"changed": [paths that differed], "unrestored": [paths
-still differing after --restore]}. Exit status 0 unless the comparison itself failed.
+Prints one JSON object: {"changed": [tracked paths that differ]}. Exit status 0
+unless the comparison itself failed.
 """
 import filecmp
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -42,36 +41,11 @@ def same(original, copy):
     return bool(first.st_mode & 0o111) == bool(second.st_mode & 0o111) and filecmp.cmp(original, copy, shallow=False)
 
 
-def restore(original, copy, workspace):
-    """Put the committed entry back, replacing whatever stands in its way, links and files in parents included."""
-    parent = workspace
-    for part in os.path.relpath(os.path.dirname(copy), workspace).split(os.sep):
-        if part in ('', '.'):
-            continue
-        parent = os.path.join(parent, part)
-        if os.path.islink(parent) or (os.path.lexists(parent) and not os.path.isdir(parent)):
-            os.unlink(parent)
-        os.makedirs(parent, exist_ok=True)
-    if os.path.isdir(copy) and not os.path.islink(copy):
-        shutil.rmtree(copy)
-    elif os.path.lexists(copy):
-        os.unlink(copy)
-    if os.path.islink(original):
-        os.symlink(os.readlink(original), copy)
-    else:
-        shutil.copy2(original, copy)
-
-
 def main(argv):
-    pristine, workspace, fix = argv[1], argv[2], '--restore' in argv[3:]
+    pristine, workspace = argv[1], argv[2]
     changed = [path for path in tracked(pristine)
                if not same(os.path.join(pristine, path), os.path.join(workspace, path))]
-    if fix:
-        for path in changed:
-            restore(os.path.join(pristine, path), os.path.join(workspace, path), workspace)
-    unrestored = [path for path in changed
-                  if not same(os.path.join(pristine, path), os.path.join(workspace, path))] if fix else changed
-    print(json.dumps({'changed': changed, 'unrestored': unrestored}))
+    print(json.dumps({'changed': changed}))
 
 
 if __name__ == '__main__':

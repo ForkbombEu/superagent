@@ -12,8 +12,8 @@ captured from the application by a completed command (curl or chromium
 addressing only the application, writing the file itself or through a tee, or
 a copy of its log under /app-logs/) and written by no other command or file
 tool, with every HTTP status the scenario reports in the status lines of its
-own responses, and reproduction steps for each failure. Anything else is
-BLOCKED, never PASS.
+own responses or in a status-only curl capture (status_only), and
+reproduction steps for each failure. Anything else is BLOCKED, never PASS.
 """
 import json
 import os
@@ -50,6 +50,10 @@ OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}'}
 REDIRECTS = {'>', '>>', '>|', '&>', '&>>', '<', '>&', '<&'}
 # curl --write-out may add only curl's own variables and separators, never a forged status line.
 WRITE_OUT = re.compile(r'(%\{[a-z_]+\}|[A-Za-z _=:,-]|\\[nt])*')
+# A write-out that prints the response status alone, and curl options that send a body elsewhere than -o.
+STATUS_WRITE_OUT = re.compile(r'(?:\s|\\[nr])*%\{(?:http_code|response_code)\}(?:\s|\\[nr])*')
+CURL_OTHER_OUTPUTS = {'--remote-name', '--remote-name-all', '--output-dir'}
+CURL_ALIASES = {'-o': '--output', '-w': '--write-out', '-O': '--remote-name'}
 # curl options that take a value: the next word, the rest of a short option cluster (`-ofile`), or `=value`.
 # Any other word that is not an option is a URL curl requests, like the value of --url.
 CURL_VALUE_SHORT = set('AbcCdDeEFHmoPQrtTuUwXyYz')
@@ -71,8 +75,9 @@ HTTP_STATUS_LINE = re.compile(rb'^HTTP/[0-9.]+ ([1-5][0-9]{2})\b', re.MULTILINE)
 # longer token (200ms, 12:30:45, 2026-11-09, #201, v1.201) is a status after one of STATUS_WORDS or
 # ANSWER_VERBS ("POST returned 201"), before a reason phrase ("404 Not Found"), continuing a list of
 # statuses ("HTTP 201, then 200") or, when the scenario's evidence holds HTTP responses, alone ("201, 200").
-# It is a quantity, an id or a contrast after one of NOT_STATUS ("id 201", "port 300", "shows 500",
-# "expected 201") or before any word but those of KEEPS_STATUS ("500 records", "200 ms").
+# It is a quantity, an id, a measurement or a contrast after one of NOT_STATUS ("id 201", "port 300",
+# "latency 200", "p95 300", "shows 500", "expected 201") or before any word but those of KEEPS_STATUS
+# ("500 records", "200 ms"), even within a list ("HTTP 201 and 200 ms later").
 NUMBER = re.compile(r'(?<![\w#.:/-])[1-5][0-9]{2}(?![\w:/-]|\.[0-9])')
 STATUS_WORDS = {'http', 'status', 'statuses', 'code', 'codes'}
 ANSWER_VERBS = {'returned', 'returns', 'return', 'returning', 'responded', 'responds', 'respond', 'answered', 'answers',
@@ -83,7 +88,10 @@ NOT_STATUS = {'id', 'ids', 'no', 'number', 'numbers', 'record', 'records', 'item
               'limit', 'offset', 'top', 'first', 'last', 'expected', 'expecting', 'expect', 'expects', 'not', 'than',
               'should', 'be', 'instead', 'shows', 'show', 'showed', 'lists', 'list', 'listed', 'contains', 'contain',
               'has', 'have', 'had', 'displays', 'display', 'displayed', 'took', 'takes', 'lasted', 'within', 'over',
-              'under', 'about', 'around', 'approximately', 'after', 'in', 'at', 'every', 'each'}
+              'under', 'about', 'around', 'approximately', 'after', 'in', 'at', 'every', 'each', 'latency',
+              'latencies', 'duration', 'durations', 'time', 'times', 'timing', 'timings', 'elapsed', 'delay', 'rtt',
+              'ttfb', 'ms', 'bytes', 'sizes', 'lengths', 'counts', 'amount', 'quantity', 'avg', 'average', 'mean',
+              'median', 'min', 'max', 'p50', 'p90', 'p95', 'p99'}
 KEEPS_STATUS = {'for', 'on', 'in', 'with', 'when', 'after', 'because', 'as', 'to', 'from', 'and', 'then', 'but',
                 'while', 'at', 'so', 'since', 'instead', 'again', 'both', 'each', 'via', 'by', 'once', 'twice', 'if',
                 'or', 'not', 'response', 'responses', 'error', 'errors', 'status', 'code', 'reply', 'answer'}
@@ -259,10 +267,11 @@ def application_hosts(origins):
     return hosts
 
 
-def request_urls(name, arguments):
+def request_urls(name, arguments, options=None):
     """The URLs a curl or chromium command requests, or None when it may also reach something else
     (a rerouting or option-file curl option, a forged write-out). Values of options (headers, bodies,
-    referers) are not requests, whatever they contain."""
+    referers) are not requests, whatever they contain. `options`, a dict, collects the values of each
+    curl option ('' for a flag) under its long name for -o, -w and -O, else as written."""
     urls, index = [], 0
     while index < len(arguments):
         word = arguments[index]
@@ -293,6 +302,10 @@ def request_urls(name, arguments):
                     if not value:
                         value, index = (arguments[index], index + 1) if index < len(arguments) else ('', index)
                     break
+                if options is not None:
+                    options.setdefault(CURL_ALIASES.get(f'-{letter}', f'-{letter}'), []).append('')
+        if options is not None and option:
+            options.setdefault(CURL_ALIASES.get(option, option), []).append(value)
         if option == '--url':
             urls.append(value)
         elif option in ('-w', '--write-out') and not WRITE_OUT.fullmatch(value):
@@ -351,22 +364,44 @@ def captures(simple, index, hosts):
     return from_application(simple[index], hosts)
 
 
+def status_only(simple, index, path):
+    """Whether simple command `index`, which captures the evidence file, writes into it the response status
+    alone: curl's standard output, redirected (`>`, `>>`, `>|`) or tee'd into the file and nowhere else,
+    holds only its single write-out, one status variable, because the body of its single, unglobbed request
+    goes to `-o /dev/null`. A body written to the file (`-o file`) or to standard output is not a status."""
+    tee = program(simple[index][0])[0] == 'tee'
+    words, targets, _ = simple[index - 1] if tee else simple[index]
+    stdout = [(target, operator) for target, operator in targets.items() if operator in ('>', '>>', '>|', '&>', '&>>')]
+    if tee:
+        if stdout:
+            return False
+    elif len(stdout) != 1 or not names(stdout[0][0], path) or stdout[0][1] not in ('>', '>>', '>|'):
+        return False
+    name, arguments = program(words)
+    options = {}
+    urls = request_urls(name, arguments, options) if name == 'curl' else None
+    write_out = options.get('--write-out', [])
+    return (urls is not None and len(urls) == 1 and not re.search(r'[][{}]', urls[0]) and len(write_out) == 1 and
+            bool(STATUS_WRITE_OUT.fullmatch(write_out[0])) and options.get('--output') == ['/dev/null'] and
+            not CURL_OTHER_OUTPUTS & options.keys() and not any(names(word, path) for word in arguments))
+
+
 def reported_statuses(text, http):
     """The HTTP status codes a scenario's `observed` text reports (see NUMBER); bare numbers count only
     when `http`, the scenario's evidence holding HTTP responses."""
     reported, previous_end, previous_reported = set(), None, False
     for match in NUMBER.finditer(text):
-        words = re.findall(r'[A-Za-z]+', text[:match.start()])[-2:]
+        words = re.findall(r'[A-Za-z][A-Za-z0-9]*', text[:match.start()])[-2:]
         before = (words[0] if len(words) == 2 and words[1].lower() in ARTICLES else (words or [''])[-1]).lower()
         after = re.match(r'\s*([A-Za-z]+)?', text[match.end():]).group(1) or ''
         continues = previous_reported and re.fullmatch(r'(?:\s*(?:,|/|\band\b|\bthen\b|\bor\b))+\s*',
                                                        text[previous_end:match.start()], re.IGNORECASE)
-        if continues or before in STATUS_WORDS or REASON.match(text[match.end():].lstrip()):
+        if before in STATUS_WORDS or REASON.match(text[match.end():].lstrip()):
             status = True
         elif before in NOT_STATUS or (after and after.lower() not in KEEPS_STATUS):
             status = False
         else:
-            status = before in ANSWER_VERBS or http
+            status = bool(continues) or before in ANSWER_VERBS or http
         if status:
             reported.add(int(match.group()))
         previous_end, previous_reported = match.end(), status
@@ -378,20 +413,18 @@ def provenance_problems(scenario, commands, hosts, work_dir):
 
     `commands` are (command, completed) of every shell call. Each cited file must be captured from the
     application (captures) by a completed command and written by nothing else; each HTTP status `observed`
-    reports must be in the status lines of its cited responses (or a bare curl %{http_code} capture)."""
+    reports must be in the status lines of its cited responses (or a status_only curl capture)."""
     problems, statuses = [], set()
     parsed = [(segments(command), completed) for command, completed in commands]
     for path in scenario['evidence']:
-        captured = forged = code_only = False
+        captured = forged = bodies = False
         for simple, completed in parsed:
             for index, segment in enumerate(simple):
                 if not writes(segment, path):
                     continue
                 if completed and captures(simple, index, hosts):
                     captured = True
-                    source = simple[index - 1] if program(segment[0])[0] == 'tee' else segment
-                    code_only |= any(variable in word for word in source[0]
-                                     for variable in ('%{http_code}', '%{response_code}'))
+                    bodies |= not status_only(simple, index, path)
                 else:
                     forged = True
         if forged:
@@ -399,6 +432,7 @@ def provenance_problems(scenario, commands, hosts, work_dir):
         elif not captured:
             problems.append(f'{path} was not captured from the application ({", ".join(sorted(hosts))}) or its log '
                             f'by a command that names it')
+        code_only = captured and not bodies
         try:
             with open(os.path.join(work_dir, path), 'rb') as file:
                 content = file.read(MAX_EVIDENCE_BYTES)

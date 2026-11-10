@@ -212,6 +212,50 @@ class EvaluateTest(unittest.TestCase):
         calls = (('bash', f'curl -sS -X POST {ORIGIN}/records > artifacts/uat-1-http.json', 'completed'), *CAPTURE[1:])
         self.assertBlocked(self.evaluate(trace(PASSING, calls=calls)), 'holds no HTTP status line')
 
+    def test_a_status_capture_must_hold_curls_write_out_alone(self):
+        record = f'-X POST {ORIGIN}/records'
+        self.write('uat-1-http.json', '201')  # The body of an HTTP 500 answer, or a write-out of 201.
+        for command in (f"curl -sS -o /dev/null -w '%{{http_code}}' {record} > artifacts/uat-1-http.json",
+                        f"curl -sS -o /dev/null -w '%{{http_code}}\\n' {record} | tee artifacts/uat-1-http.json",
+                        f'curl -sSo/dev/null --write-out=%{{response_code}} {record} >> /work/artifacts/uat-1-http.json'):
+            with self.subTest(command):
+                self.assertEqual(self.capture(command).verdict, 'PASS', self.capture(command).reasons)
+        for command in (f"curl -sS -o artifacts/uat-1-http.json -w '%{{http_code}}' {record}",
+                        f"curl -sS -o artifacts/uat-1-http.json -w '%{{http_code}}' {record} > artifacts/status.txt",
+                        f"curl -sS --output artifacts/uat-1-http.json -w '%{{http_code}}' {record} > "
+                        'artifacts/uat-1-http.json',
+                        f"curl -sS -w '%{{http_code}}' {record} > artifacts/uat-1-http.json",
+                        f"curl -sS -o - -w '%{{http_code}}' {record} > artifacts/uat-1-http.json",
+                        f"curl -sS -o /dev/null -w '%{{http_code}}' {record} {ORIGIN}/ > artifacts/uat-1-http.json",
+                        f"curl -sS -o /dev/null -w '%{{http_code}}' -O {record} > artifacts/uat-1-http.json",
+                        f"curl -sS -o /dev/null -w '%{{stderr}}%{{http_code}}' {record} &> artifacts/uat-1-http.json",
+                        f"curl -sS -o /dev/null -w '%{{http_code}}' {record} > artifacts/uat-1-http.json > /tmp/x",
+                        f"curl -sS -o /dev/null -w '%{{http_code}}%{{size_download}}' {record} > "
+                        'artifacts/uat-1-http.json'):
+            with self.subTest(command):
+                self.assertBlocked(self.capture(command), 'UAT-1: observed reports HTTP 201, but its evidence holds no '
+                                                          'HTTP status line')
+        self.write('uat-1-http.json', 'HTTP/1.1 500 Internal Server Error\r\n\r\n201')  # -i: the headers too.
+        self.assertBlocked(self.capture(f"curl -sS -i -o artifacts/uat-1-http.json -w '%{{http_code}}' {record}"),
+                           'UAT-1: observed reports HTTP 201, but its evidence holds only the responses 500')
+
+    def test_a_status_capture_and_a_response_together(self):
+        self.write('uat-1-status.txt', '201\n')
+        self.write('uat-1-get.json', 'HTTP/1.1 200 OK\r\n\r\n{"id": 1}')
+        result = copy.deepcopy(PASSING)
+        result['scenarios'][0].update(observed='POST returned 201; GET returned 200',
+                                      evidence=['artifacts/uat-1-status.txt', 'artifacts/uat-1-get.json'])
+        calls = (('bash', f"curl -sS -o /dev/null -w '%{{http_code}}\\n' -X POST {ORIGIN}/records > "
+                          f'artifacts/uat-1-status.txt; curl -sS -i {ORIGIN}/records/1 | tee artifacts/uat-1-get.json',
+                  'completed'), *CAPTURE[1:])
+        self.assertEqual(self.evaluate(trace(result, calls=calls)).verdict, 'PASS')
+        result['scenarios'][0]['observed'] = 'POST returned 201; GET returned 404'
+        self.assertBlocked(self.evaluate(trace(result, calls=calls)), 'observed reports HTTP 404, but its evidence holds '
+                                                                    'only the responses 200, 201')
+        later = (*calls, ('bash', f'curl -sS -X POST {ORIGIN}/records > artifacts/uat-1-status.txt', 'completed'))
+        result['scenarios'][0]['observed'] = 'POST returned 201; GET returned 200'
+        self.assertBlocked(self.evaluate(trace(result, calls=later)), 'observed reports HTTP 201')
+
     def test_browser_and_log_evidence_and_localhost_alias(self):
         self.write('uat-1.png', '\x89PNG fake image bytes')
         browser = copy.deepcopy(PASSING)
@@ -317,6 +361,19 @@ class EvaluateTest(unittest.TestCase):
                          'HTTP 201 and the response returned 500 records'):
             with self.subTest(observed):
                 self.assertEqual(self.capture(CAPTURE[0][1], observed).verdict, 'PASS')
+
+    def test_measurements_are_not_statuses(self):
+        for observed, statuses in (('HTTP 201; latency 200', {201}), ('HTTP 201, latency: 200 ms', {201}),
+                                   ('HTTP 201 (duration 300, p95 400, avg 250)', {201}),
+                                   ('HTTP 201; response time 200; size 500; 300 bytes', {201}),
+                                   ('HTTP 201 and 200 ms later; elapsed 150', {201}),
+                                   ('HTTP 201 and 500 records', {201}), ('HTTP 201, then 200', {200, 201}),
+                                   ('POST returned 201; GET returned 200', {200, 201}), ('201, 200', {200, 201}),
+                                   ('HTTP 201; latency 200; GET returned 404', {201, 404})):
+            with self.subTest(observed):
+                self.assertEqual(results.reported_statuses(observed, http=True), statuses)
+        self.assertEqual(results.reported_statuses('the page lists 120 records, then 300.', http=False), set())
+        self.assertEqual(self.capture(CAPTURE[0][1], 'HTTP 201; latency 200').verdict, 'PASS')
 
     def test_browser_and_log_scenarios_need_no_status(self):
         self.write('uat-1.png', '\x89PNG fake image bytes')

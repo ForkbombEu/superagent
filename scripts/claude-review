@@ -13,8 +13,12 @@ Claude Code answers with a Summary, a Review and a Fix plan. The Summary is post
 on the PR; the whole answer is printed for the worker and kept, as the history the
 next review of this PR starts from, under ~/.local/state/claude-review.
 
+When the deployment runs user acceptance tests, it reviews only a <head sha>
+whose UAT passed (or needs none) and still holds (`uat-test --verify`).
+
 Exit status: 0 PASS, 1 FAIL, 2 no usable review (nothing posted), 3 review done
-but the comment could not be posted.
+but the comment could not be posted, 4 no review because UAT has not passed for
+<head sha> (run uat-test first).
 """
 import json
 import os
@@ -29,6 +33,8 @@ PROMPT = '/usr/local/share/superagent/review-prompt.md'
 # Written by superagent-entrypoint.sh: the Claude credential, model and effort,
 # which DSH strips from worker shells as it does every *_TOKEN/*_KEY variable.
 CONFIG = '/run/superagent-secrets/claude-review.json'
+# Written by superagent-entrypoint.sh when user acceptance tests are on.
+UAT_CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
 CHECKOUTS = '/tmp/claude-review'
 HISTORY = os.path.expanduser('~/.local/state/claude-review')
 DISCLOSURE = 'This is by an automated agent, not a human.'
@@ -83,6 +89,12 @@ def main():
         fail(f'the PR head is {pr["headRefOid"]}, not {sha}: review the current head')
     if run('git', 'rev-parse', 'HEAD') != sha:
         fail(f'the working directory is not at {sha}')
+    if os.path.exists(UAT_CONFIG):
+        # UAT comes first: no review of a head without a UAT pass that still holds for it.
+        check = subprocess.run(['uat-test', '--verify', repository, number, sha], capture_output=True, text=True)
+        if check.returncode:
+            fail(f'UAT has not passed for {sha}: run `uat-test {repository} {number} {sha}` first '
+                 f'({(check.stdout + check.stderr).strip()[-500:]})', 4)
     run('git', 'fetch', '--no-tags', 'origin', pr['baseRefName'])
 
     stored = os.path.join(HISTORY, repository, f'pr-{number}')

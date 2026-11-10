@@ -33,6 +33,13 @@ services:
       # Optional Claude Code reviewer model and effort (scripts/claude-review).
       SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
+      # Optional user acceptance tests (README "User acceptance tests"): true adds
+      # the UAT step to the Delivery requirements and gives the worker uat-test,
+      # which only *requests* runs from uat-gate with the shared token. The
+      # uat-gate and uat-runner services start only with COMPOSE_PROFILES=uat.
+      SUPERAGENT_UAT_ENABLED: ${SUPERAGENT_UAT_ENABLED:-false}
+      SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
+      SUPERAGENT_UAT_GATE_URL: ${SUPERAGENT_UAT_GATE_URL:-http://uat-gate:8090}
       # Coolify derives these from the dashboard's domain (declared below). They
       # are required at start by superagent-entrypoint.sh rather than with `:?`
       # here, so `docker compose build` does not depend on them.
@@ -66,5 +73,82 @@ services:
     expose:
       - "8080"
 
+  # The UAT gate (uat/gate.py): takes run requests from superagent only, reads
+  # what each run is bound to from GitHub (read access only), drives uat-runner
+  # and keeps the verdicts. It runs no pull request code and writes nothing on
+  # GitHub. Without SUPERAGENT_UAT_GATE_TOKEN it answers 503 and does nothing.
+  # Like uat-runner, it starts only with COMPOSE_PROFILES=uat (README "Setup").
+  uat-gate:
+    profiles: [uat]
+    build:
+      context: .
+      dockerfile: uat/gate/Dockerfile
+    restart: unless-stopped
+    environment:
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?}
+      # GitHub read access for the PR, its issue and its code: the deployment's
+      # token, unless a separate read-only token is set. Never given to a container.
+      GH_TOKEN: ${GH_TOKEN:?}
+      SUPERAGENT_UAT_GITHUB_TOKEN: ${SUPERAGENT_UAT_GITHUB_TOKEN:-}
+      SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
+      # The tester's model key, passed only to the tester container on the runner.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
+      SUPERAGENT_UAT_MODEL: ${SUPERAGENT_UAT_MODEL:-}
+      SUPERAGENT_UAT_PROVIDER: ${SUPERAGENT_UAT_PROVIDER:-}
+      # The protected policy: the PR and the issue can only choose within it.
+      SUPERAGENT_UAT_ENVIRONMENTS: ${SUPERAGENT_UAT_ENVIRONMENTS:-local}
+      SUPERAGENT_UAT_MAX_FAILED_ROUNDS: ${SUPERAGENT_UAT_MAX_FAILED_ROUNDS:-3}
+      SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES: ${SUPERAGENT_UAT_TESTER_TIMEOUT_MINUTES:-30}
+      SUPERAGENT_UAT_CONCURRENCY: ${SUPERAGENT_UAT_CONCURRENCY:-2}
+      SUPERAGENT_UAT_PREVIEW_URL: ${SUPERAGENT_UAT_PREVIEW_URL:-}
+      SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS: ${SUPERAGENT_UAT_PREVIEW_ALLOWED_HOSTS:-}
+      SUPERAGENT_UAT_PREVIEW_REVISION_PATH: ${SUPERAGENT_UAT_PREVIEW_REVISION_PATH:-}
+      SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS: ${SUPERAGENT_UAT_PREVIEW_READY_TIMEOUT_SECONDS:-300}
+      SUPERAGENT_UAT_PREVIEW_CREDENTIALS: ${SUPERAGENT_UAT_PREVIEW_CREDENTIALS:-}
+      # The runner's Docker API: TLS with the client certificate only this service has.
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_TLS_VERIFY: "1"
+      DOCKER_CERT_PATH: /run/uat-gate/docker
+    volumes:
+      - uat_gate_state:/var/lib/uat-gate
+      - uat_work:/var/lib/uat-work
+      - uat_runner_certs:/certs:ro
+    tmpfs:
+      - /run/uat-gate
+    expose:
+      - "8090"  # Docker-internal only; requests are accepted from superagent alone
+    networks:
+      - default
+      - uat
+
+  # The isolated runner: a Docker daemon of its own (privileged, as Docker in
+  # Docker needs), reachable only on the uat network and only with the gate's TLS
+  # client certificate. Pull request code and the tester run in its unprivileged,
+  # capability-less containers; it has no host Docker socket, no host paths and
+  # is not on the network of superagent and the dashboard.
+  uat-runner:
+    profiles: [uat]
+    image: docker:29-dind
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    volumes:
+      - uat_runner_certs:/certs
+      - uat_runner_docker:/var/lib/docker
+      # The gate's per-run work directories, at the same path, for bind mounts.
+      - uat_work:/var/lib/uat-work
+    networks:
+      uat:
+        aliases:
+          - docker
+
+networks:
+  uat: {}
+
 volumes:
   superagent_home:
+  uat_gate_state:
+  uat_work:
+  uat_runner_certs:
+  uat_runner_docker:

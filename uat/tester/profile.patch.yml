@@ -1,0 +1,47 @@
+# superagent-uat: the UAT tester's DSH profile, seeded from the pinned
+# dsh-headless template (uat/tester/Dockerfile) and run as
+# `dsh --profile superagent-uat --json -` with the trusted prompt on stdin.
+
+# Model: the same DeepSeek provider as the coder by default.
+- id: agent-default-model
+  config:
+    provider: !!js process.env.SUPERAGENT_UAT_PROVIDER || 'deepseek-official'
+    model: !!js process.env.SUPERAGENT_UAT_MODEL || 'deepseek-flash'
+
+# The disposable tester container is the sandbox (no credentials but the
+# DeepSeek key, egress only through the allowlisting proxy). Inside it the
+# tester runs commands without DSH's bwrap/Landlock confinement, which Docker's
+# seccomp profile does not reliably allow, and nothing asks for approval: no
+# one could answer.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+    workspaceRoot: /work
+- id: approval
+  config:
+    policy: never
+
+# Tests run against the application through the sandbox network only, and
+# every tool call stays in this session's trace, which the controller checks:
+# no web tool, subagents or workflows.
+- id: tool-web
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-workflow
+  disabled: true
+
+# One model call per step: no title generation.
+- id: session-title-llm
+  disabled: true
+
+# Shell commands may take longer than the default minute (builds, browsers).
+- id: bash-sandbox
+  config:
+    timeoutMs: 300000

@@ -63,10 +63,12 @@ dependencies, standards to follow, what must never be done. One bullet each. -->
 The agent account `@forkboteu` squash-merges a pull request it opened, without
 further human approval, once an independent Claude Code review of the pull
 request's exact head commit passes and all required CI checks pass
-(`gh pr merge --squash --match-head-commit <reviewed sha>`). It never merges
-any other pull request, never uses `--admin` or bypasses branch protection, and
-does not merge work whose issue or comment explicitly forbids merging. Every
-other merge needs human approval.
+(`gh pr merge --squash --match-head-commit <reviewed sha>`). When the
+deployment runs user acceptance tests, that commit must also have passed them
+first (see "User acceptance tests" below). It
+never merges any other pull request, never uses `--admin` or bypasses branch
+protection, and does not merge work whose issue or comment explicitly forbids
+merging. Every other merge needs human approval.
 
 ## Writing issues
 
@@ -117,9 +119,69 @@ sections of docs/specification.md>
 - [ ] <verifiable behavior>
 - [ ] <tests that cover it>
 
+## User Acceptance Tests
+Environment: local
+
+### UAT-1: <observable behavior>
+Given <starting state>
+When <what a user or client does>
+Then <what they observe>
+
 Depends on #<a>, #<b>
 ```
 
 The title is a short imperative summary, such as
 `Add the rulebook import endpoint`; the agent writes the conventional pull
-request title from it.
+request title from it. The `## User Acceptance Tests` section is optional;
+leave it out when no end-to-end check applies.
+
+### User acceptance tests
+
+When the deployment enables them, an independent DeepSeek tester runs an
+issue's user acceptance tests (UAT) against the pull request's exact head
+commit after the agent pushes it, before the Claude Code review, and the
+pull request merges only after UAT passed for that commit; the tester's report
+is posted on the pull request.
+UAT checks what a user or client observes from the running application (HTTP
+responses, pages, files, command output), not unit tests or the code itself:
+the tester runs every scenario and keeps evidence of what it saw.
+
+- Write the heading exactly `## User Acceptance Tests`. Without it, no UAT runs
+  and the check says so; a heading written another way (`## User acceptance
+  test`) blocks the pull request instead of being skipped.
+- Optionally start the section with one `Environment: <name>` line: `local`
+  (the default) builds and starts the pull request's code in a disposable
+  sandbox, `preview` tests the pull request's preview deployment, when the
+  deployment provides one. Text before the first scenario is context for the
+  tester.
+- Each scenario is a `### UAT-<n>: <title>` heading with a unique positive
+  number, followed by its steps; Given/When/Then is recommended. Name exact,
+  observable outcomes (status codes, messages, records), and the fixtures or
+  test users a scenario needs. Another `### ` heading, a repeated number or a
+  scenario without steps blocks the pull request.
+- Keep scenarios to test data: they never run against production or need real
+  credentials.
+- Editing the section re-runs UAT and withdraws an earlier pass; editing the
+  rest of the issue does not.
+- A failing scenario goes back to the agent with what was expected, what was
+  observed and how to reproduce it; after three failing rounds on one pull
+  request it stops and is reported blocked, unmerged. A scenario the tester
+  cannot run is reported blocked, never passed.
+- A repository that needs setup to run locally describes it in
+  `.superagent/uat.yaml` (commands run only inside the sandbox). Setup and the
+  application may create files anywhere (dependencies, build output, data), but
+  committed files are read-only to them: a command that rewrites a committed
+  file, such as a lockfile update or a formatter, fails the run, so build into
+  untracked paths and commit lockfiles as installed:
+
+  ```yaml
+  version: 1
+  default_environment: local
+  environments:
+    local:
+      type: local
+      setup: mise run uat:setup        # optional; with network access
+      start: mise run uat:start        # keeps running; no network access
+      ready: http://127.0.0.1:3000/health
+      cleanup: mise run uat:cleanup    # optional
+  ```

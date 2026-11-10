@@ -64,17 +64,21 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
-     scripts/superagent-configure scripts/superagent-dependencies scripts/claude-review /usr/local/bin/
+     scripts/superagent-configure scripts/superagent-dependencies scripts/claude-review \
+     scripts/uat-test /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
     /usr/local/bin/superagent-dependencies \
-    /usr/local/bin/claude-review
+    /usr/local/bin/claude-review \
+    /usr/local/bin/uat-test
+# Claude Code PR review: the read-only policy (managed settings take precedence over
 # user and repository settings) and the review prompt claude-review sends, and the
-# Delivery requirements that superagent-configure saves.
+# Delivery requirements that superagent-configure saves (delivery-uat.md only when
+# SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
-COPY claude-code/review-prompt.md prompts/delivery.md /usr/local/share/superagent/
+COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
 
 USER agent
 

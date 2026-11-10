@@ -16,6 +16,14 @@ case "${SUPERAGENT_REVIEWER_EFFORT:-}" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo 'SUPERAGENT_REVIEWER_EFFORT must be low, medium, high, xhigh or max' >&2; exit 1 ;;
 esac
+case "${SUPERAGENT_UAT_ENABLED:-false}" in
+  false) ;;
+  true) uat_token=${SUPERAGENT_UAT_GATE_TOKEN:-}
+     [ "${#uat_token}" -ge 32 ] || {
+       echo 'Set SUPERAGENT_UAT_GATE_TOKEN (32+ characters, the same in uat-gate) to use user acceptance tests' >&2
+       exit 1; } ;;
+  *) echo 'SUPERAGENT_UAT_ENABLED must be true or false' >&2; exit 1 ;;
+esac
 
 # Validate OWNER/REPO before deriving a local checkout path.
 python3 - "$GITHUB_REPOSITORY" <<'PY'
@@ -44,6 +52,20 @@ print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
                   'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}))
 PY
 unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+
+# uat-test (and claude-review, to require a UAT pass first) read the gate's URL
+# and the request token from here. The token only lets a requester ask for runs;
+# the gate reads everything a run is bound to from GitHub. No file: UAT is off.
+rm -f /run/superagent-secrets/uat.json
+if [ "${SUPERAGENT_UAT_ENABLED:-false}" = true ]; then
+  install -m 0600 /dev/null /run/superagent-secrets/uat.json
+  python3 > /run/superagent-secrets/uat.json <<'PY'
+import json, os
+print(json.dumps({'gate_url': os.environ.get('SUPERAGENT_UAT_GATE_URL') or 'http://uat-gate:8090',
+                  'token': os.environ['SUPERAGENT_UAT_GATE_TOKEN']}))
+PY
+fi
+unset SUPERAGENT_UAT_GATE_TOKEN
 
 # Use exactly the agent identity supplied by the token; never interactive login.
 /usr/local/bin/gh-agent api user --jq .login > /dev/null || {

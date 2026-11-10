@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ForkbombEu/superagent/uat/config.schema.json",
+  "title": "Superagent UAT target repository configuration (.superagent/uat.yaml)",
+  "description": "PR-controlled: the commands run only inside the disposable sandbox. Preview URLs, hosts, credentials and timeouts come from the UAT gate's protected policy, never from this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "environments"],
+  "properties": {
+    "version": {"const": 1},
+    "default_environment": {"$ref": "#/$defs/name"},
+    "environments": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 8,
+      "propertyNames": {"$ref": "#/$defs/name"},
+      "additionalProperties": {"oneOf": [{"$ref": "#/$defs/local"}, {"$ref": "#/$defs/preview"}]}
+    }
+  },
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "command": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "local": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "start", "ready"],
+      "properties": {
+        "type": {"const": "local"},
+        "setup": {"$ref": "#/$defs/command"},
+        "start": {"$ref": "#/$defs/command"},
+        "ready": {"type": "string", "maxLength": 500,
+                  "pattern": "^http://(127\\.0\\.0\\.1|localhost):[1-9][0-9]{0,4}(/[^\\s]*)?$"},
+        "cleanup": {"$ref": "#/$defs/command"}
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "preview"},
+        "readiness_path": {"type": "string", "maxLength": 500, "pattern": "^/[^\\s]*$"}
+      }
+    }
+  }
+}

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""User acceptance tests of one pull request commit through the UAT gate, for dsh-superagent workers.
+
+Usage, in the ticket directory, as a background job:
+  uat-test <owner/repo> <pr number> <head sha>            run UAT on the head (or get its result) and wait
+  uat-test --verify <owner/repo> <pr number> <head sha>   before merging: does its PASS still hold?
+  uat-test --artifact <run id> <path>                     print one file a run kept (logs, evidence)
+
+DSH Superagent decides when to test and what to do next; this command, like
+claude-review, runs one independent check of one commit. It asks the UAT gate
+(the uat-gate service) for a run of <head sha>; the gate re-reads the PR, its
+issue and the policy from GitHub itself, runs the DeepSeek tester on its
+isolated runner and keeps the verdict. This command sends no verdict, only
+the request, and accepts a result only when the gate's record is for exactly
+<head sha> and, for a pass, still holds for the PR's current head and its
+issue's current UAT spec.
+
+When the ticket started from a GitHub issue (DSH_SUPERAGENT_GITHUB_NUMBER,
+set by DSH Superagent, without DSH_SUPERAGENT_GITHUB_PR_HEAD), the request
+names that issue: the gate pins it to the PR and requires the PR to close
+it, so editing the PR's `Closes #<n>` line cannot swap its UAT for another.
+
+The report (verdict, failing scenarios with expected, observed and
+reproduction, the run id for --artifact) is printed, kept under
+~/.local/state/uat-test and posted on the PR as a comment, as the record of
+each run; the same run is posted once.
+
+Exit status: 0 PASS, or no UAT required, for <head sha> (for --verify: the
+result still holds); 1 FAIL (--verify: it does not); 2 BLOCKED (including no
+failing rounds left); 3 no verdict (gate unreachable, timeout, a result that
+does not match the head or spec) or a report that could not be posted.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+# Written by superagent-entrypoint.sh: the gate URL and request token.
+CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
+HISTORY = os.path.expanduser('~/.local/state/uat-test')
+GH = os.environ.get('UAT_TEST_GH', 'gh-agent')
+DISCLOSURE = 'This is by an automated agent, not a human.'
+POLL_SECONDS = float(os.environ.get('UAT_TEST_POLL_SECONDS', '15'))
+TIMEOUT_SECONDS = float(os.environ.get('UAT_TEST_TIMEOUT_SECONDS', str(150 * 60)))
+# How long the gate may stay unreachable before giving up (restarts take well under this).
+OUTAGE_SECONDS = float(os.environ.get('UAT_TEST_OUTAGE_SECONDS', '300'))
+MAX_STALE_REQUESTS = 2
+# GitHub rejects comments over 65536 characters.
+MAX_COMMENT = 60000
+EXIT = {'PASS': 0, 'NOT_REQUIRED': 0, 'FAIL': 1, 'BLOCKED': 2}
+
+
+def fail(message, status=3):
+    print(f'uat-test: {message}', file=sys.stderr)
+    sys.exit(status)
+
+
+def load_config():
+    try:
+        with open(CONFIG, encoding='utf-8') as file:
+            config = json.load(file)
+        return config['gate_url'].rstrip('/'), config['token']
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        fail(f'UAT is not configured in this deployment ({CONFIG}: {error})')
+
+
+def gate(method, path, body=None):
+    """(status, answer) from the gate, retrying while it is unreachable for up to OUTAGE_SECONDS."""
+    url, token = load_config()
+    deadline = time.monotonic() + OUTAGE_SECONDS
+    while True:
+        request = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                         headers={'authorization': f'Bearer {token}', 'content-type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read()
+                return response.status, (raw if '/files/' in path else json.loads(raw))
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read())
+            except ValueError:
+                return error.code, {'error': f'HTTP {error.code}'}
+        except (urllib.error.URLError, OSError) as error:
+            if time.monotonic() > deadline:
+                fail(f'the UAT gate at {url} is unreachable: {error}')
+            time.sleep(min(POLL_SECONDS, 10))
+
+
+def gh(*args, stdin=None):
+    return subprocess.run([GH, *args], input=stdin, capture_output=True, text=True)
+
+
+def body(repository, number, sha):
+    request = {'repository': repository, 'pr': int(number), 'head_sha': sha}
+    origin = os.environ.get('DSH_SUPERAGENT_GITHUB_NUMBER', '').strip()
+    if origin.isdigit() and not os.environ.get('DSH_SUPERAGENT_GITHUB_PR_HEAD', '').strip():
+        request['issue'] = int(origin)
+    return request
+
+
+def verify(repository, number, sha):
+    status, answer = gate('POST', '/v1/uat/verify', body(repository, number, sha))
+    if status != 200:
+        fail(f'the UAT gate refused the check (HTTP {status}): {answer.get("error")}')
+    return answer
+
+
+def wait(repository, number, sha):
+    """The completed gate run for the head, requesting it again when it went stale."""
+    started, stale = time.monotonic(), 0
+    while True:
+        status, run = gate('POST', '/v1/uat/runs', body(repository, number, sha))
+        if status != 200:
+            fail(f'the UAT gate refused the request (HTTP {status}): {run.get("error")}')
+        print(f'uat-test: UAT run {run["run_id"]} for {sha} is {run["state"].lower()}', flush=True)
+        while run['state'] != 'COMPLETE':
+            if time.monotonic() - started > TIMEOUT_SECONDS:
+                fail(f'no UAT verdict for {sha} within {TIMEOUT_SECONDS / 60:.0f} minutes (run {run["run_id"]})')
+            time.sleep(POLL_SECONDS)
+            status, run = gate('GET', f'/v1/uat/runs/{run["run_id"]}')
+            if status != 200:
+                fail(f'the UAT gate lost the run (HTTP {status}): {run.get("error")}')
+        if run['head_sha'] != sha or run['repository'].lower() != repository.lower() or run['pr'] != int(number):
+            fail(f'UAT run {run["run_id"]} is for {run["repository"]}#{run["pr"]} at {run["head_sha"]}, not {sha}')
+        if run['verdict'] in ('PASS', 'NOT_REQUIRED'):
+            check = verify(repository, number, sha)
+            if check['current'] and (check.get('run') or {}).get('run_id') == run['run_id']:
+                return run
+            print(f'uat-test: UAT run {run["run_id"]} no longer holds: {check["reason"]}', flush=True)
+        elif run['verdict'] != 'STALE':
+            return run
+        stale += 1
+        if stale > MAX_STALE_REQUESTS:
+            fail(f'UAT run {run["run_id"]} went stale {stale} times: the PR or its issue keeps changing')
+        print(f'uat-test: requesting a new UAT run for {sha}', flush=True)
+
+
+def report(repository, number, sha, run):
+    body = (f'# {run["title"]}\n\n{run["summary"] or ""}\n\n{run["text"] or ""}\n\n'
+            f'UAT run: {run["run_id"]} (files: uat-test --artifact {run["run_id"]} <path>)\n').replace('\n\n\n', '\n\n')
+    directory = os.path.join(HISTORY, repository, f'pr-{number}')
+    os.makedirs(directory, exist_ok=True)
+    saved = os.path.join(directory, f'{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}-{sha[:12]}.md')
+    with open(saved, 'w', encoding='utf-8') as file:
+        file.write(body)
+    # The PR comment is the record of the run, as claude-review's is of a review; one per run.
+    posted_marker = os.path.join(directory, f'posted-{run["run_id"]}')
+    posted = True
+    if not os.path.exists(posted_marker):
+        details = f'{run["summary"] or ""}\n\n{run["text"] or ""}'.strip()
+        if len(details) > MAX_COMMENT:
+            details = details[:MAX_COMMENT] + '\n\n(Truncated to fit a GitHub comment.)'
+        comment = (f'{DISCLOSURE}\n\n**DeepSeek UAT** of {sha}: **{run["verdict"]}** ({run["title"]})\n\n{details}\n\n'
+                   f'UAT run `{run["run_id"]}`.\n')
+        result = gh('pr', 'comment', number, '--repo', repository, '--body-file', '-', stdin=comment)
+        posted = result.returncode == 0
+        if posted:
+            open(posted_marker, 'w').close()
+    print(body)
+    print(f'uat-test: the whole report is in {saved}')
+    print(f'uat-test: failing rounds used: {run["failed_rounds"]} of {run.get("max_failed_rounds", "?")}')
+    print(f'uat-test: {run["verdict"]} for {sha}')
+    if not posted:
+        fail(f'the report could not be posted on PR #{number}: {result.stderr.strip()}')
+    sys.exit(EXIT[run['verdict']])
+
+
+def main(args):
+    if len(args) == 3 and args[0] == '--artifact':
+        status, data = gate('GET', f'/v1/uat/runs/{args[1]}/files/{args[2].lstrip("/")}')
+        if status != 200:
+            fail(f'no such file in UAT run {args[1]}: {data.get("error") if isinstance(data, dict) else status}')
+        sys.stdout.write(data.decode('utf-8', 'replace'))
+        return
+    checking = bool(args) and args[0] == '--verify'
+    args = args[1:] if checking else args
+    if len(args) != 3 or not args[1].isdigit() or not re.fullmatch(r'[0-9a-f]{40}', args[2]):
+        fail('usage: uat-test [--verify] <owner/repo> <pr number> <full 40-character head sha>, '
+             'or uat-test --artifact <run id> <path>')
+    repository, number, sha = args
+    load_config()
+    view = gh('pr', 'view', number, '--repo', repository, '--json', 'headRefOid')
+    if view.returncode:
+        fail(f'{GH} pr view failed: {view.stderr.strip()}')
+    head = json.loads(view.stdout)['headRefOid']
+    if head != sha:
+        fail(f'the PR head is {head}, not {sha}: test the current head')
+    if checking:
+        answer = verify(repository, number, sha)
+        print(f'uat-test: {"current" if answer["current"] else "NOT current"} for {sha}: {answer["reason"]}')
+        sys.exit(0 if answer['current'] else 1)
+    run = wait(repository, number, sha)
+    if run['verdict'] not in EXIT:
+        fail(f'UAT run {run["run_id"]} ended with {run["verdict"]!r}')
+    report(repository, number, sha, run)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

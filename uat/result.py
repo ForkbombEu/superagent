@@ -41,9 +41,10 @@ APP_LOGS = '/app-logs/'
 # application answered, and readers that copy its log.
 CLIENTS = {'curl', 'chromium'}
 LOG_READERS = {'cp', 'cat', 'tail', 'head'}
-# Commands that only read the files they name; any other command naming an evidence file may write it.
-READERS = {'cat', 'head', 'tail', 'grep', 'jq', 'less', 'wc', 'ls', 'file', 'stat', 'sha256sum', 'md5sum', 'test',
-           '[', 'xxd', 'od', 'diff', 'cmp'}
+# Commands that do not write the contents of files they name; any other command naming an evidence file
+# may write it. `rm` can remove evidence, which evidence_problem detects, but cannot fabricate its contents.
+NON_WRITERS = {'cat', 'head', 'tail', 'grep', 'jq', 'less', 'wc', 'ls', 'file', 'stat', 'sha256sum', 'md5sum', 'test',
+               '[', 'xxd', 'od', 'diff', 'cmp', 'rm'}
 PREFIXES = {'env', 'command', 'nice', 'time'}
 # Shell tokens that end a simple command; `|` also pipes its output into the next one.
 OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}'}
@@ -361,7 +362,7 @@ def writes(segment, path):
     named = [index for index, word in enumerate(arguments) if names(word, path)]
     if name == 'cp' and named:
         return named[-1] == len(arguments) - 1
-    return bool(named) and name not in READERS
+    return bool(named) and name not in NON_WRITERS
 
 
 def captures(simple, index, hosts):

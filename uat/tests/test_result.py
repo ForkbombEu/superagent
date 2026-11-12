@@ -272,14 +272,22 @@ class EvaluateTest(unittest.TestCase):
         logs = (*CAPTURE[:2], ('bash', 'tail -n 50 /app-logs/app.log | tee artifacts/server.log', 'completed'))
         self.assertEqual(self.evaluate(trace(PASSING, calls=logs)).verdict, 'PASS')
 
+    def test_artifact_can_be_deleted_before_recapture(self):
+        command = f'rm -f /work/artifacts/uat-1-http.json; {CAPTURE[0][1]}'
+        calls = (('bash', command, 'completed'), *CAPTURE[1:])
+        self.assertEqual(self.evaluate(trace(PASSING, calls=calls)).verdict, 'PASS')
+        fabricated = f'rm -f artifacts/uat-1-http.json; echo "HTTP/1.1 201 Created" > artifacts/uat-1-http.json'
+        calls = (('bash', fabricated, 'completed'), *CAPTURE[1:])
+        self.assertBlocked(self.evaluate(trace(PASSING, calls=calls)), 'uat-1-http.json is written')
+
     def test_browser_stderr_redirection_is_not_a_url(self):
         self.write('uat-1.png', '\x89PNG fake image bytes')
         browser = copy.deepcopy(PASSING)
         browser['scenarios'][0].update(observed='the record page lists the new record', evidence=['artifacts/uat-1.png'])
         for redirection in ('2>/dev/null', '2> /dev/null'):
             with self.subTest(redirection=redirection):
-                command = (f'timeout 60 chromium --headless --no-sandbox --screenshot=/work/artifacts/uat-1.png '
-                           f'{ORIGIN}/records {redirection}')
+                command = (f'rm -f /work/artifacts/uat-1.png; timeout 60 chromium --headless --no-sandbox '
+                           f'--screenshot=/work/artifacts/uat-1.png {ORIGIN}/records {redirection}')
                 calls = (('bash', command, 'completed'), *CAPTURE[1:])
                 self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
         command = (f'chromium --headless --screenshot=/work/artifacts/uat-1.png {ORIGIN}/records '

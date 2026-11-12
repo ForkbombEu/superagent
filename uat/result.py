@@ -49,6 +49,8 @@ PREFIXES = {'env', 'command', 'nice', 'time'}
 # Shell tokens that end a simple command; `|` also pipes its output into the next one.
 OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}'}
 REDIRECTS = {'>', '>>', '>|', '&>', '&>>', '<', '>&', '<&'}
+# Marks an IO number (`2` in `2>file`) for segments: a NUL byte, which no shell command line can contain.
+IO_NUMBER = '\0'
 # curl --write-out may add only curl's own variables and separators, never a forged status line.
 WRITE_OUT = re.compile(r'(%\{[a-z_]+\}|[A-Za-z _=:,-]|\\[nt])*')
 # A write-out that prints the response status alone, and curl options that send a body elsewhere than -o.
@@ -193,8 +195,8 @@ def evidence_problem(path, work_dir, hand_written):
 
 def shell_text(command):
     """The command without comments (`#` starting a word, outside quotes, to the end of its line), with
-    line continuations joined and the other unquoted newlines made `;`, as the shell reads them. Unquoted
-    IO numbers attached to redirections are omitted: they select a file descriptor, not a command argument."""
+    line continuations joined and the other unquoted newlines made `;`, as the shell reads them. An unquoted
+    IO number attached to a redirection (`2>`) is marked with IO_NUMBER, so segments can tell it from a word."""
     kept, quote, index = [], None, 0
     while index < len(command):
         char = command[index]
@@ -210,7 +212,8 @@ def shell_text(command):
             end = index + 1
             while end < len(command) and command[end].isdigit():
                 end += 1
-            if any(command.startswith(operator, end) for operator in REDIRECTS):
+            if command[end:end + 1] in ('<', '>'):
+                kept.append(IO_NUMBER + command[index:end])
                 index = end
                 continue
         elif char == '#' and (index == 0 or command[index - 1] in ' \t\n;|&()'):
@@ -227,17 +230,28 @@ def shell_text(command):
 
 def segments(command):
     """The simple commands of a shell command line: (words, {redirection target: operator}, piped into the
-    next one). An unparsable command has none."""
+    next one). An operator redirecting a descriptor other than standard input or output carries its number
+    (`2>`). An unparsable command has none."""
     lexer = shlex.shlex(shell_text(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split, lexer.commenters = True, ''
     try:
         tokens = list(lexer)
     except ValueError:
         return []
-    found, words, targets, redirect = [], [], {}, None
+    found, words, targets, redirect, descriptor = [], [], {}, None, None
     for token in [*tokens, ';']:
         if redirect:
             targets[token], redirect = redirect, None
+            continue
+        if descriptor is not None:
+            number, descriptor = descriptor, None
+            if token in REDIRECTS:
+                default = 0 if token.startswith('<') else 1
+                redirect = token if int(number) == default else number + token
+                continue
+            words.append(number)
+        if token.startswith(IO_NUMBER) and token[1:].isdigit():
+            descriptor = token[1:]
         elif token in REDIRECTS:
             redirect = token
         elif token in OPERATORS:
@@ -357,7 +371,8 @@ def writes(segment, path):
     but a known reader that names it (a client's output option, cp, sed -i, an interpreter ...)."""
     words, targets, _ = segment
     name, arguments = program(words)
-    if any(names(target, path) and operator not in ('<', '>&', '<&') for target, operator in targets.items()):
+    if any(names(target, path) and operator.lstrip('0123456789') not in ('<', '>&', '<&')
+           for target, operator in targets.items()):
         return True
     named = [index for index, word in enumerate(arguments) if names(word, path)]
     if name == 'cp' and named:
@@ -365,9 +380,12 @@ def writes(segment, path):
     return bool(named) and name not in NON_WRITERS
 
 
-def captures(simple, index, hosts):
+def captures(simple, index, hosts, path):
     """Whether simple command `index`, which writes the evidence file, writes what the application answered:
-    it outputs only that, or it is a tee fed by such a command."""
+    it outputs only that, or it is a tee fed by such a command. A redirection of another descriptor into the
+    file (`2>file`, the client's diagnostics) is not a capture."""
+    if any(names(target, path) and operator[0].isdigit() for target, operator in simple[index][1].items()):
+        return False
     if program(simple[index][0])[0] == 'tee':
         return index > 0 and simple[index - 1][2] and from_application(simple[index - 1], hosts)
     return from_application(simple[index], hosts)
@@ -431,7 +449,7 @@ def provenance_problems(scenario, commands, hosts, work_dir):
             for index, segment in enumerate(simple):
                 if not writes(segment, path):
                     continue
-                if completed and captures(simple, index, hosts):
+                if completed and captures(simple, index, hosts, path):
                     captured = True
                     bodies |= not status_only(simple, index, path)
                 else:

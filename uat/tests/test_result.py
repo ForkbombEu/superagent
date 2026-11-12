@@ -290,10 +290,17 @@ class EvaluateTest(unittest.TestCase):
                            f'--screenshot=/work/artifacts/uat-1.png {ORIGIN}/records {redirection}')
                 calls = (('bash', command, 'completed'), *CAPTURE[1:])
                 self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
-        command = (f'chromium --headless --screenshot=/work/artifacts/uat-1.png {ORIGIN}/records '
-                   '2 >/dev/null')
-        calls = (('bash', command, 'completed'), *CAPTURE[1:])
-        self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'uat-1.png is written')
+        for refused in (f'chromium --headless --screenshot=/work/artifacts/uat-1.png {ORIGIN}/records 2 >/dev/null',
+                        f'chromium --headless --dump-dom {ORIGIN}/records 2>/work/artifacts/uat-1.png',
+                        f'curl -sS {ORIGIN}/records 2>>artifacts/uat-1.png'):
+            with self.subTest(refused=refused):
+                calls = (('bash', refused, 'completed'), *CAPTURE[1:])
+                self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'uat-1.png is written')
+
+    def test_status_capture_with_silenced_stderr(self):
+        self.write('uat-1-http.json', '201\n')
+        command = f"curl -sS -o /dev/null -w '%{{http_code}}' {ORIGIN}/records > artifacts/uat-1-http.json 2>/dev/null"
+        self.assertEqual(self.capture(command, observed='POST returned 201').verdict, 'PASS')
 
     def test_numbers_that_are_not_status_codes(self):
         quantities = copy.deepcopy(PASSING)

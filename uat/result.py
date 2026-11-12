@@ -192,7 +192,8 @@ def evidence_problem(path, work_dir, hand_written):
 
 def shell_text(command):
     """The command without comments (`#` starting a word, outside quotes, to the end of its line), with
-    line continuations joined and the other unquoted newlines made `;`, as the shell reads them."""
+    line continuations joined and the other unquoted newlines made `;`, as the shell reads them. Unquoted
+    IO numbers attached to redirections are omitted: they select a file descriptor, not a command argument."""
     kept, quote, index = [], None, 0
     while index < len(command):
         char = command[index]
@@ -204,6 +205,13 @@ def shell_text(command):
             kept.append('' if command[index + 1:index + 2] == '\n' else command[index:index + 2])
             index += 2
             continue
+        elif char.isdigit() and (index == 0 or command[index - 1] in ' \t\n;|&(){}'):
+            end = index + 1
+            while end < len(command) and command[end].isdigit():
+                end += 1
+            if any(command.startswith(operator, end) for operator in REDIRECTS):
+                index = end
+                continue
         elif char == '#' and (index == 0 or command[index - 1] in ' \t\n;|&()'):
             index = command.find('\n', index)
             if index < 0:

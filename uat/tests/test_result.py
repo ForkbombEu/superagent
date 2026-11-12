@@ -272,6 +272,21 @@ class EvaluateTest(unittest.TestCase):
         logs = (*CAPTURE[:2], ('bash', 'tail -n 50 /app-logs/app.log | tee artifacts/server.log', 'completed'))
         self.assertEqual(self.evaluate(trace(PASSING, calls=logs)).verdict, 'PASS')
 
+    def test_browser_stderr_redirection_is_not_a_url(self):
+        self.write('uat-1.png', '\x89PNG fake image bytes')
+        browser = copy.deepcopy(PASSING)
+        browser['scenarios'][0].update(observed='the record page lists the new record', evidence=['artifacts/uat-1.png'])
+        for redirection in ('2>/dev/null', '2> /dev/null'):
+            with self.subTest(redirection=redirection):
+                command = (f'timeout 60 chromium --headless --no-sandbox --screenshot=/work/artifacts/uat-1.png '
+                           f'{ORIGIN}/records {redirection}')
+                calls = (('bash', command, 'completed'), *CAPTURE[1:])
+                self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
+        command = (f'chromium --headless --screenshot=/work/artifacts/uat-1.png {ORIGIN}/records '
+                   '2 >/dev/null')
+        calls = (('bash', command, 'completed'), *CAPTURE[1:])
+        self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'uat-1.png is written')
+
     def test_numbers_that_are_not_status_codes(self):
         quantities = copy.deepcopy(PASSING)
         quantities['scenarios'][0]['observed'] = ('HTTP 201 in 350ms on port 3000; the list shows 500 records, 404 '

@@ -297,6 +297,28 @@ class EvaluateTest(unittest.TestCase):
                 calls = (('bash', refused, 'completed'), *CAPTURE[1:])
                 self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'uat-1.png is written')
 
+    def test_image_tools_read_evidence_and_write_only_their_output(self):
+        self.write('uat-1.png', '\x89PNG fake image bytes')
+        browser = copy.deepcopy(PASSING)
+        browser['scenarios'][0].update(observed='the record page lists the new record', evidence=['artifacts/uat-1.png'])
+        capture = ('bash', f'chromium --headless --screenshot=/work/artifacts/uat-1.png {ORIGIN}/records', 'completed')
+        for inspection in ('identify /work/artifacts/uat-1.png',
+                           'compare -metric AE /work/artifacts/uat-1.png /work/other.png /work/diff.png 2>&1 || true',
+                           'convert /work/artifacts/uat-1.png -crop 1280x120+0+0 +repage /work/header.png',
+                           'compare -metric AE <(convert /work/artifacts/uat-1.png -crop 10x10+0+0 png:-) '
+                           '<(convert /work/other.png png:-) null: 2>&1 || true'):
+            with self.subTest(inspection=inspection):
+                calls = (capture, ('bash', inspection, 'completed'), *CAPTURE[1:])
+                self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
+        for overwrite in ('convert /work/fake.png /work/artifacts/uat-1.png',
+                          'convert /work/fake.png png:artifacts/uat-1.png',
+                          'convert /work/fake.png -write artifacts/uat-1.png /work/copy.png',
+                          'compare /work/a.png /work/b.png /work/artifacts/uat-1.png',
+                          'cat <(convert /work/fake.png artifacts/uat-1.png)'):
+            with self.subTest(overwrite=overwrite):
+                calls = (capture, ('bash', overwrite, 'completed'), *CAPTURE[1:])
+                self.assertBlocked(self.evaluate(trace(browser, calls=calls)), 'uat-1.png is written')
+
     def test_status_capture_with_silenced_stderr(self):
         self.write('uat-1-http.json', '201\n')
         command = f"curl -sS -o /dev/null -w '%{{http_code}}' {ORIGIN}/records > artifacts/uat-1-http.json 2>/dev/null"

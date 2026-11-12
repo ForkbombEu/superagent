@@ -44,10 +44,14 @@ LOG_READERS = {'cp', 'cat', 'tail', 'head'}
 # Commands that do not write the contents of files they name; any other command naming an evidence file
 # may write it. `rm` can remove evidence, which evidence_problem detects, but cannot fabricate its contents.
 NON_WRITERS = {'cat', 'head', 'tail', 'grep', 'jq', 'less', 'wc', 'ls', 'file', 'stat', 'sha256sum', 'md5sum', 'test',
-               '[', 'xxd', 'od', 'diff', 'cmp', 'rm'}
+               '[', 'xxd', 'od', 'diff', 'cmp', 'rm', 'identify'}
+# Commands that write only their last argument (cp's destination, ImageMagick's output image) and, for
+# ImageMagick, the file after a -write option; the other files they name are inputs.
+LAST_ARGUMENT_WRITERS = {'cp', 'convert', 'compare', 'composite', 'montage', 'magick'}
 PREFIXES = {'env', 'command', 'nice', 'time'}
-# Shell tokens that end a simple command; `|` also pipes its output into the next one.
-OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}'}
+# Shell tokens that end a simple command; `|` also pipes its output into the next one. A process
+# substitution (`<(cmd)`, `>(cmd)`) holds a command of its own, like a subshell.
+OPERATORS = {';', '&&', '||', '|', '&', '(', ')', '{', '}', '<(', '>('}
 REDIRECTS = {'>', '>>', '>|', '&>', '&>>', '<', '>&', '<&'}
 # Marks an IO number (`2` in `2>file`) for segments: a NUL byte, which no shell command line can contain.
 IO_NUMBER = '\0'
@@ -275,8 +279,9 @@ def program(words):
 
 
 def names(word, path):
-    """Whether a word names the evidence file (`artifacts/x`, `/work/artifacts/x`, `--opt=artifacts/x`)."""
-    return word == path or word.endswith(('/' + path, '=' + path))
+    """Whether a word names the evidence file (`artifacts/x`, `/work/artifacts/x`, `--opt=artifacts/x`,
+    ImageMagick's `png:artifacts/x`)."""
+    return word == path or word.endswith(('/' + path, '=' + path, ':' + path))
 
 
 def application_hosts(origins):
@@ -367,16 +372,18 @@ def from_application(segment, hosts):
 
 
 def writes(segment, path):
-    """Whether a simple command may write the evidence file: a redirection or tee into it, or any command
-    but a known reader that names it (a client's output option, cp, sed -i, an interpreter ...)."""
+    """Whether a simple command may write the evidence file: a redirection or tee into it, the output of a
+    command that writes only its last argument, or any command but a known reader that names it (a
+    client's output option, sed -i, an interpreter ...)."""
     words, targets, _ = segment
     name, arguments = program(words)
     if any(names(target, path) and operator.lstrip('0123456789') not in ('<', '>&', '<&')
            for target, operator in targets.items()):
         return True
     named = [index for index, word in enumerate(arguments) if names(word, path)]
-    if name == 'cp' and named:
-        return named[-1] == len(arguments) - 1
+    if name in LAST_ARGUMENT_WRITERS:
+        return any(index == len(arguments) - 1 or (index > 0 and arguments[index - 1] in ('-write', '+write'))
+                   for index in named)
     return bool(named) and name not in NON_WRITERS
 
 

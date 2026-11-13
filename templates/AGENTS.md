@@ -164,9 +164,10 @@ the tester runs every scenario and keeps evidence of what it saw.
 - Editing the section re-runs UAT and withdraws an earlier pass; editing the
   rest of the issue does not.
 - A failing scenario goes back to the agent with what was expected, what was
-  observed and how to reproduce it; after three failing rounds on one pull
-  request it stops and is reported blocked, unmerged. A scenario the tester
-  cannot run is reported blocked, never passed.
+  observed and how to reproduce it, and so does a scenario the tester cannot
+  run against the pull request, with what it lacked; after three such rounds
+  on one pull request it stops and is reported blocked, unmerged. A scenario
+  is never passed without being run.
 - A repository that needs setup to run locally describes it in
   `.superagent/uat.yaml` (commands run only inside the sandbox). Setup and the
   application may create files anywhere (dependencies, build output, data), but

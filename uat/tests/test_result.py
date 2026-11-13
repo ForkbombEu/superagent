@@ -74,11 +74,21 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
         self.assertEqual(outcome.result['scenarios'][1]['observed'], 'HTTP 500')
 
-    def test_scenario_blocked_reports_blocked_with_reason(self):
+    def test_scenario_the_tester_could_not_run_fails_with_reason(self):
         blocked = copy.deepcopy(PASSING)
         blocked['verdict'] = 'BLOCKED'
         blocked['scenarios'][1].update(verdict='BLOCKED', observed='fixture user is missing', evidence=[])
-        self.assertBlocked(self.evaluate(trace(blocked)), 'UAT-2: fixture user is missing')
+        outcome = self.evaluate(trace(blocked))
+        self.assertEqual(outcome.verdict, 'FAIL', outcome.reasons)
+        self.assertEqual(outcome.reasons, ['UAT-2 could not be run against this pull request: fixture user is missing'])
+
+    def test_untrusted_answer_with_a_blocked_scenario_stays_blocked(self):
+        blocked = copy.deepcopy(PASSING)
+        blocked['verdict'] = 'BLOCKED'
+        blocked['scenarios'][1].update(verdict='BLOCKED', observed='fixture user is missing', evidence=[])
+        blocked['scenarios'][0]['evidence'] = ['artifacts/missing.txt']
+        outcome = self.evaluate(trace(blocked))
+        self.assertBlocked(outcome, 'UAT-1')
 
     def test_unexpected_exit(self):
         self.assertBlocked(self.evaluate(trace(PASSING), exit_code=1), 'exited 1')

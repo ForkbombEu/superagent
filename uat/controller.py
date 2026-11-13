@@ -328,7 +328,8 @@ def report(snapshot, outcome, failed_rounds, max_rounds):
     if outcome.verdict == PASS:
         return f'UAT passed: {len(scenarios)} scenarios', f'{where}\n\n{table}', text
     if outcome.verdict == FAIL:
-        failing = [s['id'] for s in scenarios if s['verdict'] == FAIL] or ['the application']
+        failing = ([s['id'] for s in scenarios if s['verdict'] == FAIL]
+                   + [f'{s["id"]} could not be run' for s in scenarios if s['verdict'] == BLOCKED]) or ['the application']
         return (f'UAT failed: {", ".join(failing)} (failing round {failed_rounds} of {max_rounds})',
                 f'{where}\n\n{table}\n\n{reasons}'.strip(), text)
     if outcome.verdict == STALE:

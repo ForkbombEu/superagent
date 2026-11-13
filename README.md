@@ -374,15 +374,18 @@ responses; not quantities, ids, ports or durations such as `500 records`,
 `id 404`, `port 3000`, `200 ms`) must be in the status lines of
 its own cited responses. Anything else (timeout, crash, malformed answer,
 missing, fabricated or unrelated evidence, a PASS without executed commands)
-is `BLOCKED`.
+is `BLOCKED`. A valid answer in which the tester could not run a scenario
+(a fixture, or a control such as a restart, that the PR does not provide) is
+a `FAIL` with what was missing: the worker makes it runnable in the PR, and
+reports blocked only when just the issue could.
 DSH's own transient model errors are retried once.
 
 | Verdict | `uat-test` | Merge | Counts as a failing round |
 | --- | --- | --- | --- |
 | `PASS` | 0 | after a review pass, while it holds | no |
 | `NOT_REQUIRED` | 0 | after a review pass, while it holds | no |
-| `FAIL` (a scenario fails, or the PR cannot be set up, started or configured) | 1 | no | yes |
-| `BLOCKED` (cannot run, invalid UAT section, environment not allowed, budget used up, runner or gate failure) | 2 | no | no |
+| `FAIL` (a scenario fails or cannot be run against the PR, or the PR cannot be set up, started or configured) | 1 | no | yes |
+| `BLOCKED` (invalid UAT section, environment not allowed, untrusted tester answer, budget used up, runner or gate failure) | 2 | no | no |
 | `STALE` (head, spec, environment, the ticket's issue or the UAT policy changed) | asks for a new run | no | no |
 
 Verdicts are plain records in the gate (verdict, exact head SHA, spec hash,

@@ -13,7 +13,9 @@ addressing only the application, writing the file itself or through a tee, or
 a copy of its log under /app-logs/) and written by no other command or file
 tool, with every HTTP status the scenario reports in the status lines of its
 own responses or in a status-only curl capture (status_only), and
-reproduction steps for each failure. Anything else is BLOCKED, never PASS.
+reproduction steps for each failure. Anything else is BLOCKED, never PASS. A
+valid answer whose scenarios the tester could not all execute (none failing)
+is a FAIL with the tester's reasons: it goes back to the pull request's author.
 """
 import json
 import os
@@ -538,8 +540,11 @@ def evaluate(raw_trace, exit_code, timed_out, expected, scenario_ids, work_dir, 
             reasons.append(f'{scenario["id"]} fails without reproduction steps')
         reasons += [f'{scenario["id"]}: {problem}' for problem in provenance_problems(scenario, commands, hosts, work_dir)]
     if not reasons:
-        outcome.verdict = derived
+        # A scenario the tester could not execute against this pull request goes back to its author, who can
+        # often make it runnable (a fixture through the setup, a control the start command provides); a counted
+        # failing round bounds that, and the author reports blocked when only the issue could help.
+        outcome.verdict = FAIL if derived == BLOCKED else derived
         if derived == BLOCKED:
-            outcome.reasons = [f'{scenario["id"]}: {scenario["observed"]}' for scenario in result['scenarios']
-                               if scenario['verdict'] == BLOCKED]
+            outcome.reasons = [f'{scenario["id"]} could not be run against this pull request: {scenario["observed"]}'
+                               for scenario in result['scenarios'] if scenario['verdict'] == BLOCKED]
     return outcome

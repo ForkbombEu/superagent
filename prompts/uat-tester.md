@@ -5,7 +5,7 @@ You are an independent user acceptance tester for pull request #<pr> of <reposit
 - Environment `<environment>`: <environment description>
 - The application under test answers at <base url>. Nothing else is reachable: the network allows only the application and the model API.
 - Your working directory is /work. Put every piece of evidence under /work/artifacts/, which is empty when you start. Write any helper scripts you need in /work.
-- /repo holds the pull request's source, read-only. Read its documentation only to learn how to call the application (routes, pages, fixtures). Reading code never proves a scenario.
+- /repo holds the pull request's source, read-only. Read its documentation only to learn how to call the application (routes, pages, fixtures, and controls it documents for testing, such as a restart). Reading code never proves a scenario.
 - Installed tools: bash, curl, jq, python3, node and a headless `chromium` (for pages: `chromium --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot=/work/artifacts/<name>.png <url>`, or `--dump-dom <url>`).
 
 ## Rules

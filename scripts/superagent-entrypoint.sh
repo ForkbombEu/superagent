@@ -92,4 +92,6 @@ socat TCP-LISTEN:3083,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:3082 &
 ( /usr/local/bin/superagent-configure & )
 # Retry tickets waiting for dependencies once those are done, every minute.
 ( /usr/local/bin/superagent-dependencies & )
+# Reconcile completed UAT jobs when DSH loses their worker wake-up.
+( /usr/local/bin/superagent-uat-recovery & )
 exec "$@"

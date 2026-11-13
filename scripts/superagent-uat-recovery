@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Resume a ticket when its detached UAT job has reached a durable verdict.
+
+A worker records ``Waiting for UAT: PR #<number> at <full sha>`` before it ends
+its turn for a background uat-test invocation.  DSH normally resumes the worker
+when that command exits; this sidecar closes the gap when that wake-up is lost.
+It asks the trusted UAT gate for the already-requested run and retries the ticket
+only after the gate says that run is complete.  The retried worker reads the
+retained marker and continues from uat-test's durable result.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = 'http://127.0.0.1:3082/orchestrator/api/'
+HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
+UAT_CONFIG = '/run/superagent-secrets/uat.json'
+INTERVAL_SECONDS = 60
+MAX_RETRIES = 3
+WAITING = re.compile(r'^Waiting for UAT: PR #(\d+) at ([0-9a-f]{40})$', re.IGNORECASE)
+# Pre-recovery wording emitted by workers before the durable marker existed.
+LEGACY_WAITING = re.compile(r'waiting on a fresh UAT run for head ([0-9a-f]{7,40})', re.IGNORECASE)
+
+
+def log(message):
+    print(f'superagent-uat-recovery: {message}', file=sys.stderr, flush=True)
+
+
+def call(method, path):
+    request = urllib.request.Request(API + path, data=b'{}' if method == 'POST' else None, method=method, headers=HEADERS)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+def load_config():
+    try:
+        with open(UAT_CONFIG, encoding='utf-8') as file:
+            config = json.load(file)
+        return config['gate_url'].rstrip('/'), config['token']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def gate_run(config, repository, number, sha):
+    url, token = config
+    body = json.dumps({'repository': repository, 'pr': number, 'head_sha': sha}).encode()
+    request = urllib.request.Request(f'{url}/v1/uat/runs', data=body, method='POST',
+                                     headers={'authorization': f'Bearer {token}', 'content-type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+def legacy_pr(repository, sha):
+    """Resolve an old short-SHA wait report only when it identifies one open PR."""
+    result = subprocess.run(['gh-agent', 'api', f'repos/{repository}/commits/{sha}/pulls'], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'resolving PR for {sha}: {result.stderr.strip()}')
+    matches = [pr for pr in json.loads(result.stdout)
+               if pr.get('state') == 'open' and (pr.get('head') or {}).get('sha', '').startswith(sha)]
+    if len(matches) != 1:
+        return None
+    return matches[0]['number'], matches[0]['head']['sha']
+
+
+def waiting(ticket, repository):
+    summary = ticket.get('summary', '').strip().split('\n', 1)[0]
+    found = WAITING.fullmatch(summary)
+    if found:
+        return int(found.group(1)), found.group(2)
+    legacy = LEGACY_WAITING.search(summary)
+    return legacy and legacy_pr(repository, legacy.group(1))
+
+
+def sweep(repository, retries, reported):
+    config = load_config()
+    if config is None:
+        return
+    for ticket in call('GET', 'tickets?state=person&limit=1000')['items']:
+        if ticket.get('action') != 'blocked' or not ticket.get('actions', {}).get('retry'):
+            continue
+        pending = waiting(ticket, repository)
+        if not pending:
+            continue
+        number, sha = pending
+        key = ticket['id'], sha
+        try:
+            run = gate_run(config, repository, number, sha)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError, KeyError) as error:
+            if reported.get(key) != str(error):
+                reported[key] = str(error)
+                log(f'cannot reconcile ticket {ticket["id"]} ({ticket["title"]}) UAT for PR #{number}: {error}')
+            continue
+        if run.get('state') != 'COMPLETE':
+            continue
+        if retries.get(key, 0) >= MAX_RETRIES:
+            if reported.get(key) != ticket.get('updatedAt'):
+                reported[key] = ticket.get('updatedAt')
+                log(f'ticket {ticket["id"]} ({ticket["title"]}) still waits after {MAX_RETRIES} UAT recoveries; leaving it')
+            continue
+        call('POST', f'tickets/{ticket["id"]}/retry')
+        retries[key] = retries.get(key, 0) + 1
+        log(f'retried ticket {ticket["id"]} ({ticket["title"]}): UAT {run.get("verdict", "result")} for PR #{number} at {sha[:12]}')
+
+
+def main():
+    repository = os.environ['GITHUB_REPOSITORY']
+    retries, reported, last_error = {}, {}, None
+    while True:
+        try:
+            sweep(repository, retries, reported)
+            last_error = None
+        except (urllib.error.URLError, OSError, ValueError, RuntimeError, KeyError) as error:
+            if str(error) != last_error:
+                log(f'sweep failed, retrying in {INTERVAL_SECONDS} s: {error}')
+                last_error = str(error)
+        time.sleep(INTERVAL_SECONDS)
+
+
+if __name__ == '__main__':
+    main()

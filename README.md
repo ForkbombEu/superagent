@@ -193,6 +193,13 @@ The command:
   run in parallel, up to `SUPERAGENT_MAX_WORKERS`. Each issue must mention
   `@forkboteu` and be opened by an allowed account, so that it becomes a
   Ticket; it must not ask to wait for a person.
+- A lost completion wake-up cannot strand a UAT ticket. Before a worker waits
+  for its detached UAT job, it records `Waiting for UAT: PR #<n> at <sha>`.
+  [`superagent-uat-recovery`](scripts/superagent-uat-recovery) asks the
+  trusted gate for that exact run every minute and retries the blocked ticket
+  once the run has a durable verdict. The resumed worker reads that result and
+  continues with the reviewer, fix, or block path; it does not reset the UAT
+  counter. A ticket gets at most three recovery retries for one SHA.
 - At most three failing reviews per PR; then the worker reports blocked and
   leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
   branch protection; a merge GitHub refuses is reported, not retried.

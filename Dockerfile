@@ -64,13 +64,14 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
-     scripts/superagent-configure scripts/superagent-dependencies scripts/claude-review \
-     scripts/uat-test /usr/local/bin/
+     scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
+     scripts/claude-review scripts/uat-test /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
     /usr/local/bin/superagent-dependencies \
+    /usr/local/bin/superagent-uat-recovery \
     /usr/local/bin/claude-review \
     /usr/local/bin/uat-test
 # Claude Code PR review: the read-only policy (managed settings take precedence over

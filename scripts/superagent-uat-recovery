@@ -23,7 +23,8 @@ UAT_CONFIG = '/run/superagent-secrets/uat.json'
 INTERVAL_SECONDS = 60
 MAX_RETRIES = 3
 WAITING = re.compile(r'^Waiting for UAT: PR #(\d+) at ([0-9a-f]{40})$', re.IGNORECASE)
-# Pre-recovery wording emitted by workers before the durable marker existed.
+# Worker wording seen before and after the durable marker was introduced.
+RETRY_WAITING = re.compile(r'waiting on the UAT retry for PR #(\d+)', re.IGNORECASE)
 LEGACY_WAITING = re.compile(r'waiting on a fresh UAT run for head ([0-9a-f]{7,40})', re.IGNORECASE)
 
 
@@ -66,12 +67,25 @@ def legacy_pr(repository, sha):
         return None
     return matches[0]['number'], matches[0]['head']['sha']
 
+def current_pr(repository, number):
+    """The current head only when a PR-number wait report still identifies an open PR."""
+    result = subprocess.run(['gh-agent', 'api', f'repos/{repository}/pulls/{number}'], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'resolving PR #{number}: {result.stderr.strip()}')
+    pull = json.loads(result.stdout)
+    if pull.get('state') != 'open' or not re.fullmatch(r'[0-9a-f]{40}', (pull.get('head') or {}).get('sha', '')):
+        return None
+    return number, pull['head']['sha']
+
 
 def waiting(ticket, repository):
     summary = ticket.get('summary', '').strip().split('\n', 1)[0]
     found = WAITING.fullmatch(summary)
     if found:
         return int(found.group(1)), found.group(2)
+    retry = RETRY_WAITING.search(summary)
+    if retry:
+        return current_pr(repository, int(retry.group(1)))
     legacy = LEGACY_WAITING.search(summary)
     return legacy and legacy_pr(repository, legacy.group(1))
 

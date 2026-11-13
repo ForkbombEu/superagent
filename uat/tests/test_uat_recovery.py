@@ -52,6 +52,13 @@ class RecoveryTest(unittest.TestCase):
                    {'state': 'COMPLETE', 'verdict': 'PASS'})
         self.assertEqual(self.posts, [('POST', 'tickets/ticket-1/retry')])
 
+    def test_retry_wait_report_resolves_the_current_pull_request_head(self):
+        self.module.current_pr = lambda repository, number: (number, SHA)
+        self.sweep(self.ticket('The editor-session ticket is waiting on the UAT retry for PR #17; '
+                                'the deployment resumes it when the gate records a result.'),
+                   {'state': 'COMPLETE', 'verdict': 'PASS'})
+        self.assertEqual(self.posts, [('POST', 'tickets/ticket-1/retry')])
+
     def test_nonblocked_tickets_are_not_retried(self):
         ticket = self.ticket(f'Waiting for UAT: PR #17 at {SHA}')
         ticket['action'] = 'completed'

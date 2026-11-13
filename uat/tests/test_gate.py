@@ -463,6 +463,8 @@ class HttpTest(Gate):
         for sha, verdict, comment in zip((SHA1, SHA2, SHA3, SHA4), ('PASS', 'FAIL', 'BLOCKED', 'NOT_REQUIRED'),
                                          self.gh.comments):
             self.assertIn(f'**DeepSeek UAT** of {sha}: **{verdict}**', comment['body'])
+            if verdict in ('PASS', 'FAIL'):
+                self.assertIn('tester/attempt-1/trace.ndjson', comment['body'])
 
     def test_the_same_run_is_reported_once(self):
         self.client(REPOSITORY, '9', SHA1)

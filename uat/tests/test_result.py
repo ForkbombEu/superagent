@@ -264,6 +264,8 @@ class EvaluateTest(unittest.TestCase):
                           '--screenshot=/work/artifacts/uat-1.png http://localhost:3000/records/1', 'completed'),
                  *CAPTURE[1:])
         self.assertEqual(self.evaluate(trace(browser, calls=calls)).verdict, 'PASS')
+        inspection = ('bash', 'for f in /work/artifacts/uat-1.png; do identify "$f"; done', 'completed')
+        self.assertEqual(self.evaluate(trace(browser, calls=(calls[0], inspection, *CAPTURE[1:]))).verdict, 'PASS')
         for elsewhere in ('chromium --headless --screenshot=artifacts/uat-1.png https://example.com/',
                           'chromium --headless --screenshot=artifacts/uat-1.png "data:text/html,<h1>Saved</h1>"'):
             with self.subTest(elsewhere):

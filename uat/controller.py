@@ -313,7 +313,7 @@ def report(snapshot, outcome, failed_rounds, max_rounds):
     where = (f'Issue #{snapshot["issue"]}, environment `{snapshot["environment"]}`, commit `{snapshot["sha"]}`, '
              f'spec `{snapshot["meta"]["uat_spec_sha256"][:12]}`, UAT run `{snapshot["run_id"]}`. Evidence and logs: '
              f'`uat-test --artifact {snapshot["run_id"]} <path>` (`outcome.json`, `app-logs/app.log`, '
-             '`tester-work/attempt-1/artifacts/...`).')
+             '`tester-work/attempt-1/artifacts/...`, `tester/attempt-1/trace.ndjson`).')
     reasons = '\n'.join(f'- {reason}' for reason in outcome.reasons)
     details = []
     for s in scenarios:

@@ -43,8 +43,9 @@ CLIENTS = {'curl', 'chromium'}
 LOG_READERS = {'cp', 'cat', 'tail', 'head'}
 # Commands that do not write the contents of files they name; any other command naming an evidence file
 # may write it. `rm` can remove evidence, which evidence_problem detects, but cannot fabricate its contents.
+# `for` is a shell keyword, not a writer: its body is parsed into later segments and checked separately.
 NON_WRITERS = {'cat', 'head', 'tail', 'grep', 'jq', 'less', 'wc', 'ls', 'file', 'stat', 'sha256sum', 'md5sum', 'test',
-               '[', 'xxd', 'od', 'diff', 'cmp', 'rm', 'identify'}
+               '[', 'xxd', 'od', 'diff', 'cmp', 'rm', 'identify', 'for'}
 # Commands that write only their last argument (cp's destination, ImageMagick's output image) and, for
 # ImageMagick, the file after a -write option; the other files they name are inputs.
 LAST_ARGUMENT_WRITERS = {'cp', 'convert', 'compare', 'composite', 'montage', 'magick'}

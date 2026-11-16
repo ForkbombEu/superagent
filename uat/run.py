@@ -130,6 +130,7 @@ def run(meta, spec, *, image, network, proxy, work_root, out_dir, base_url, repo
             json.dump(records, file, indent=2)
         if not outcome.transient:
             break
+    outcome.retryable = outcome.transient
     return outcome, work_dir
 
 

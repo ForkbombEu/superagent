@@ -286,19 +286,20 @@ def execute(ctx, snapshot, run_dir, images, token=None, server='https://github.c
             else:
                 outcome = sandbox.run_local(snapshot['meta'], run_spec, checkout, entry, settings, out)
     except Exception as error:  # Infrastructure, not the PR: blocked, never passed.
-        outcome = results.Outcome(BLOCKED, [f'the UAT run failed: {type(error).__name__}: {error}'])
+        outcome = results.Outcome(BLOCKED, [f'the UAT run failed: {type(error).__name__}: {error}'], retryable=True)
         log(f'run {snapshot["run_id"]} failed: {error!r}')
     finally:
         with open(os.path.join(out, 'outcome.json'), 'w', encoding='utf-8') as file:
             json.dump({'verdict': outcome.verdict, 'reasons': outcome.reasons, 'transient': outcome.transient,
-                       'result': outcome.result}, file, indent=2)
+                       'result': outcome.result, 'retryable': outcome.retryable}, file, indent=2)
         redact_tree(out, [policy.tester_environment.get('DEEPSEEK_API_KEY', ''), token or '']
                     + credential_values(policy.preview['credentials']))
         sandbox.prune(out)
         # The report published on GitHub and given to the worker comes from the redacted file, never memory.
         with open(os.path.join(out, 'outcome.json'), encoding='utf-8') as file:
             kept = json.load(file)
-        outcome = results.Outcome(kept['verdict'], kept['reasons'], kept['transient'], kept['result'], outcome.tool_calls)
+        outcome = results.Outcome(kept['verdict'], kept['reasons'], kept['transient'], kept['result'],
+                                  outcome.tool_calls, kept.get('retryable', False))
         log(f'run {snapshot["run_id"]}: {outcome.verdict}: {"; ".join(outcome.reasons)[:2000]}')
     return outcome
 
@@ -334,7 +335,11 @@ def report(snapshot, outcome, failed_rounds, max_rounds):
                 f'{where}\n\n{table}\n\n{reasons}'.strip(), text)
     if outcome.verdict == STALE:
         return 'UAT result is stale', f'{where}\n\n{reasons}\n\nRun `uat-test` for the current head.', text
-    return 'UAT blocked', f'{where}\n\n{reasons}\n\n{table}'.strip(), text
+    retry = ('The runner or gate was unavailable; one later request may run UAT again.'
+             if outcome.retryable else
+             'This blocked result is retained for this head; requesting UAT again returns it until the head, UAT '
+             'specification or environment changes.')
+    return 'UAT blocked', f'{where}\n\n{reasons}\n\n{retry}\n\n{table}'.strip(), text
 
 
 def conclude(ctx, snapshot, outcome):

@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS runs (
   key TEXT NOT NULL, issue INTEGER, spec_sha256 TEXT, environment TEXT, status TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETE')), verdict TEXT,
   failed_rounds INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
-  snapshot TEXT, title TEXT, summary TEXT, text TEXT,
+  retryable INTEGER NOT NULL DEFAULT 0, snapshot TEXT, title TEXT, summary TEXT, text TEXT,
   created REAL NOT NULL, updated REAL NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_pr ON runs (repository, pr) WHERE state != 'COMPLETE';
 CREATE INDEX IF NOT EXISTS runs_by_key ON runs (key, created);
@@ -78,6 +78,8 @@ class Gate:
         self.db = sqlite3.connect(os.path.join(state_dir, 'gate.db'), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        if 'retryable' not in {column['name'] for column in self.db.execute('PRAGMA table_info(runs)')}:
+            self.db.execute('ALTER TABLE runs ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0')
         self.lock = threading.RLock()
         self.pr_locks = collections.defaultdict(threading.Lock)
         self.wake = threading.Condition()
@@ -102,13 +104,14 @@ class Gate:
         self.query('INSERT INTO budgets VALUES (?, ?, ?) ON CONFLICT (repository, pr) DO UPDATE '
                    'SET failed_rounds = max(failed_rounds, excluded.failed_rounds)', repository, pr, failed_rounds)
 
-    def finish_run(self, run_id, verdict, failed_rounds, title, summary, text, expected_state):
+    def finish_run(self, run_id, verdict, failed_rounds, title, summary, text, expected_state, retryable=False):
         """Complete a run unless it was completed meanwhile (superseded); True when this call did."""
         with self.lock:
             changed = self.db.execute(
-                'UPDATE runs SET state = ?, verdict = ?, failed_rounds = ?, title = ?, summary = ?, text = ?, '
-                'updated = ? WHERE id = ? AND state = ?',
-                (COMPLETE, verdict, failed_rounds, title, summary, text, time.time(), run_id, expected_state)).rowcount
+                'UPDATE runs SET state = ?, verdict = ?, failed_rounds = ?, retryable = ?, title = ?, summary = ?, '
+                'text = ?, updated = ? WHERE id = ? AND state = ?',
+                (COMPLETE, verdict, failed_rounds, int(retryable), title, summary, text, time.time(), run_id,
+                 expected_state)).rowcount
         return changed == 1
 
     def view(self, row):
@@ -116,7 +119,7 @@ class Gate:
         answer = {'run_id': row['id'], 'repository': row['repository'], 'pr': row['pr'], 'head_sha': row['head_sha'],
                   'issue': row['issue'], 'spec_sha256': row['spec_sha256'], 'environment': row['environment'],
                   'state': row['state'], 'verdict': row['verdict'], 'failed_rounds': row['failed_rounds'],
-                  'max_failed_rounds': self.ctx.policy.max_failed_rounds}
+                  'retryable': bool(row['retryable']), 'max_failed_rounds': self.ctx.policy.max_failed_rounds}
         if row['state'] == COMPLETE:
             answer.update(title=row['title'], summary=row['summary'], text=row['text'])
         return answer
@@ -161,7 +164,8 @@ class Gate:
                 raise Refused(409, f'the PR head is {found["sha"]}, not {head_sha}: test the current head')
             same = self.one('SELECT * FROM runs WHERE key = ? ORDER BY created DESC LIMIT 1', found['key'])
             if same and (same['state'] in ACTIVE or same['verdict'] in FINAL
-                         or (same['verdict'] == controller.BLOCKED and found['status'] != 'READY')):
+                         or (same['verdict'] == controller.BLOCKED
+                             and (not same['retryable'] or found['status'] != 'READY'))):
                 return self.view(same)
             for active in self.query('SELECT * FROM runs WHERE repository = ? AND pr = ? AND state != ?',
                                      repository, pr, COMPLETE):
@@ -248,7 +252,7 @@ class Gate:
             except Exception as error:  # Never leave a run RUNNING because of a gate bug or GitHub outage.
                 controller.log(f'run {row["id"]} failed in the gate: {error!r}')
                 self.finish_run(row['id'], controller.BLOCKED, row['failed_rounds'], 'UAT blocked',
-                                f'The UAT gate failed: {error}', '', 'RUNNING')
+                                f'The UAT gate failed: {error}', '', 'RUNNING', retryable=True)
             with self.wake:
                 self.wake.notify_all()
 
@@ -259,7 +263,8 @@ class Gate:
             outcome = self.executor(self.ctx, snapshot, run_dir)
         except Exception as error:  # The runner, not the PR: BLOCKED, published like any verdict.
             controller.log(f'run {row["id"]}: the executor failed: {error!r}')
-            outcome = results.Outcome(controller.BLOCKED, [f'the UAT runner failed: {type(error).__name__}: {error}'])
+            outcome = results.Outcome(controller.BLOCKED, [f'the UAT runner failed: {type(error).__name__}: {error}'],
+                                      retryable=True)
         finally:
             kept = os.path.join(self.state_dir, 'runs', row['id'])
             if os.path.isdir(os.path.join(run_dir, 'out')):
@@ -270,7 +275,7 @@ class Gate:
         if current['state'] != 'RUNNING':
             return  # Superseded meanwhile: already STALE.
         verdict, failed, title, summary, text = controller.conclude(self.ctx, snapshot, outcome)
-        if self.finish_run(row['id'], verdict, failed, title, summary, text, 'RUNNING'):
+        if self.finish_run(row['id'], verdict, failed, title, summary, text, 'RUNNING', outcome.retryable):
             self.raise_budget(row['repository'], row['pr'], failed)
 
     def recover(self):
@@ -287,7 +292,8 @@ class Gate:
                 self.query("UPDATE runs SET state = 'QUEUED', updated = ? WHERE id = ?", time.time(), row['id'])
                 continue
             title, summary = 'UAT blocked', 'The UAT gate restarted during this run twice; it was not completed.'
-            self.finish_run(row['id'], controller.BLOCKED, row['failed_rounds'], title, summary, '', 'RUNNING')
+            self.finish_run(row['id'], controller.BLOCKED, row['failed_rounds'], title, summary, '', 'RUNNING',
+                            retryable=True)
 
     def cleanup(self):
         """Drop the kept files of runs older than the retention period (their records stay)."""
@@ -326,7 +332,9 @@ class Runner:
                 if self.images is None:
                     self.images = controller.build_images('gate')
         except Exception as error:
-            return results.Outcome(controller.BLOCKED, [f'the UAT runner is unavailable: {type(error).__name__}: {error}'])
+            return results.Outcome(controller.BLOCKED,
+                                   [f'the UAT runner is unavailable: {type(error).__name__}: {error}'],
+                                   retryable=True)
         return controller.execute(ctx, snapshot, run_dir, self.images, token=self.token, server=self.server)
 
 

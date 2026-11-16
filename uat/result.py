@@ -120,6 +120,8 @@ class Outcome:
     transient: bool = False
     result: dict | None = None
     tool_calls: int = 0
+    # A completed blocked run can be requested again only when an infrastructure failure might have changed.
+    retryable: bool = False
 
 
 def read_trace(raw):

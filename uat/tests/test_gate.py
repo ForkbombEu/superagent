@@ -141,7 +141,9 @@ class RunTest(Gate):
         self.assertFalse(self.current(SHA1))
         self.gh.add_issue(7, ISSUE)
         self.verdicts[SHA1] = 'BLOCKED'
-        self.assertEqual(self.run_to_end()['verdict'], 'BLOCKED')
+        blocked = self.run_to_end()
+        self.assertEqual(blocked['verdict'], 'BLOCKED')
+        self.assertEqual(self.request()['run_id'], blocked['run_id'])
         self.assertFalse(self.current(SHA1))
 
     def test_same_key_is_answered_not_rerun(self):

@@ -72,6 +72,14 @@ services:
       - SERVICE_URL_DASHBOARD_8080
     expose:
       - "8080"
+    # Explicit for Coolify Compose (the UI Healthcheck page does not apply).
+    # Same probe as dashboard/Dockerfile HEALTHCHECK.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
   # The UAT gate (uat/gate.py): takes run requests from superagent only, reads
   # what each run is bound to from GitHub (read access only), drives uat-runner

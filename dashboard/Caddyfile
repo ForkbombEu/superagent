@@ -1,6 +1,13 @@
 # Inner proxy in front of DSH. Coolify's outer Caddy terminates HTTPS.
 # Never publish this listener directly to the Internet.
 :8080 {
+    # Local readiness only: Coolify and Docker probe this without hitting DSH
+    # (which would 401 without a session). Does not imply Superagent is up;
+    # compose waits on the superagent service healthcheck for that.
+    handle /healthz {
+        respond "ok" 200
+    }
+
     @management path /orchestrator/api/*
     handle @management {
         # The Superagent management API authenticates nothing itself: it trusts

@@ -9,8 +9,10 @@
 Browser (HTTPS)
   -> Coolify Caddy proxy :443
     -> dashboard (internal Caddy :8080)
+       -> /console*  -> console:3000 (Opus chat; cookie gate)
        -> superagent:3083 (socat tunnel to DSH 127.0.0.1:3082)
 ```
+
 
 Access is authenticated by DSH itself: the launch-token URL that DSH prints in
 the container log mints a signed, `HttpOnly`, `SameSite=Strict` session cookie
@@ -52,7 +54,8 @@ Configure Environment Variables:
 | `DEEPSEEK_API_KEY`                               | Model provider secret (runtime only)                                                                                                                                                                                                                                                                                                                                                       |
 | `GH_TOKEN`                                       | GitHub classic PAT for dedicated agent account (runtime only)                                                                                                                                                                                                                                                                                                                              |
 | `GITHUB_REPOSITORY`                              | e.g. `ForkbombEu/credimi-attestbook`                                                                                                                                                                                                                                                                                                                                                       |
-| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token`                                                                                                                                                                                                                                                                 |
+| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token`. The Opus [console](#console) also needs `ANTHROPIC_API_KEY` on the `console` service                                                                                                                                                                          |
+| `SUPERAGENT_CONSOLE_MODEL`                       | Optional. Anthropic model id for the console chat; empty uses `claude-opus-5-5`                                                                                                                                                                                                                                                                                                          |
 | `SUPERAGENT_REVIEWER_MODEL`                      | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses Claude Code's default for the account                                                                                                                                                                                                                                            |
 | `SUPERAGENT_REVIEWER_EFFORT`                     | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`)                                                                                                                                                                                                                                                                |
 | `SUPERAGENT_UAT_ENABLED`                         | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` and `uat-runner` services, which start only with `COMPOSE_PROFILES=uat`; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
@@ -557,7 +560,32 @@ that need Docker build the images and drive real DSH against a scripted model
 (`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them). CI runs them, and builds
 the superagent image, on every pull request (`.github/workflows/test.yml`).
 
+## Console
+
+The Opus console is a same-origin chat behind the dashboard cookie gate. Open
+it from the DSH web UI: the left-sidebar **Console** icon opens a main panel
+iframe of `/console/`.
+
+It needs `ANTHROPIC_API_KEY` on the `console` service (the Claude Code OAuth
+token alone is not enough). Without that key the page says chat is not
+configured. Optional `SUPERAGENT_CONSOLE_MODEL` selects the Anthropic model
+id (default `claude-opus-5-5`).
+
+Trust boundaries:
+
+- Admission is the same Caddy `forward_auth` cookie check as
+  `/orchestrator/api/*`; signed-out requests get 401.
+- The console service calls the management API with **GET only**, forwarding
+  the caller's cookie; it has no GitHub client and only drafts issue Markdown.
+- Repo context is this Superagent tree baked into the console image at
+  `/opt/console-repo`, indexed once with `codebase-memory-mcp` at process
+  start (stale until rebuild). Confined `read_file` / `glob` / `grep`
+  fallbacks refuse path escape. No `GH_TOKEN`, no runtime clone, no writes.
+- Chat threads stay in the browser's `localStorage`; nothing is stored
+  server-side.
+
 ## 6. Operational notes and limitations
+
 
 - Keep existing service name `superagent` and volume `superagent_home` when
   migrating from the previous package. Docker Compose/Coolify may still

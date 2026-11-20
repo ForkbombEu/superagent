@@ -64,6 +64,9 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
+COPY dsh/console-plugin /opt/superagent-console
+RUN chown -R agent:agent /opt/superagent-console
+
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test scripts/superagent_checks.py /usr/local/bin/
@@ -90,6 +93,7 @@ USER agent
 RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
+    dsh plugin --profile superagent add 'link:/opt/superagent-console'; \
     mkdir -p "$DSH_HOME/state/superagent"; \
     printf '%s\n' \
       '- id: webserver' \

@@ -1,0 +1,4 @@
+# Client doorway only: register the package so the profile serves its browser client.
+- insert:
+    - id: superagent-console
+      name: superagent-console

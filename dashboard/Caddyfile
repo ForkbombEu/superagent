@@ -31,6 +31,18 @@
         }
     }
 
+    # Opus console: same cookie gate as the management API; Host/Origin kept so
+    # the page and its /console/api/* fetches stay same-origin with the dashboard.
+    @console path /console /console/*
+    handle @console {
+        forward_auth superagent:3083 {
+            uri /?
+        }
+        @crossSite header_regexp Sec-Fetch-Site ^(cross-site|same-site)$
+        respond @crossSite 403
+        reverse_proxy console:3000
+    }
+
     handle {
         # For the main DSH Web GUI, keep the browser Host and Origin.
         # dsh --trusted-host allows that explicit public hostname; DSH itself

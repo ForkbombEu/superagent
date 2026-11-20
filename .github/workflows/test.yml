@@ -27,6 +27,24 @@ jobs:
         env:
           SUPERAGENT_UAT_SKIP_DOCKER_TESTS: "1"
 
+  console:
+    name: console
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
   docker:
     name: docker
     runs-on: ubuntu-latest
@@ -50,4 +68,4 @@ jobs:
       GITHUB_REPOSITORY: ci-dummy/ci-dummy
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose build superagent
+      - run: docker compose build superagent console dashboard

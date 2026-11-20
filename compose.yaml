@@ -58,6 +58,37 @@ services:
     expose:
       - "3083"  # Docker-internal only; no host port mapping
 
+  # Opus console behind the dashboard cookie gate. Not required for the rest of
+  # the stack: dashboard must not depend_on it. Needs ANTHROPIC_API_KEY (not the
+  # Claude Code OAuth token alone); without it the chat route answers 503.
+  console:
+    build:
+      context: .
+      dockerfile: console/Dockerfile
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SUPERAGENT_CONSOLE_MODEL: ${SUPERAGENT_CONSOLE_MODEL:-}
+      SUPERAGENT_CONSOLE_API_URL: ${SUPERAGENT_CONSOLE_API_URL:-http://dashboard:8080/orchestrator/api}
+      SUPERAGENT_CONSOLE_REPO_ROOT: /opt/console-repo
+      # Public Host when the Docker-internal Host is refused by DSH on /.
+      SERVICE_FQDN_DASHBOARD: ${SERVICE_FQDN_DASHBOARD:-}
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/console/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+
   dashboard:
     build:
       context: ./dashboard
@@ -80,6 +111,7 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
 
   # The UAT gate (uat/gate.py): takes run requests from superagent only, reads
   # what each run is bound to from GitHub (read access only), drives uat-runner

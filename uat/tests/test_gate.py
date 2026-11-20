@@ -552,10 +552,14 @@ class HttpTest(Gate):
 class ConfigureTest(unittest.TestCase):
     """superagent-configure turns the UAT procedure on with SUPERAGENT_UAT_ENABLED alone."""
 
-    def delivery(self, **environ):
+    def configure(self):
         loader = importlib.machinery.SourceFileLoader('configure', os.path.join(ROOT, 'scripts', 'superagent-configure'))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader('configure', loader))
         loader.exec_module(module)
+        return module
+
+    def delivery(self, **environ):
+        module = self.configure()
         module.DELIVERY = os.path.join(ROOT, 'prompts', 'delivery.md')
         module.DELIVERY_UAT = os.path.join(ROOT, 'prompts', 'delivery-uat.md')
         view = {'sources': [{'id': 'github', 'value': {'config': {'repository': REPOSITORY, 'cli': module.GH_CLI}},
@@ -580,6 +584,18 @@ class ConfigureTest(unittest.TestCase):
             os.environ.update(saved)
         return prompts['current']['config']['delivery']
 
+    def tier_routes(self, **environ):
+        """Call tier_routes under a cleared environment (GITHUB_REPOSITORY not required)."""
+        module = self.configure()
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(environ)
+        try:
+            return module.tier_routes()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
     def test_uat_procedure_needs_no_github_app(self):
         with open(os.path.join(ROOT, 'prompts', 'delivery.md')) as file:
             base = file.read().strip()
@@ -588,6 +604,37 @@ class ConfigureTest(unittest.TestCase):
         self.assertEqual(self.delivery(), base)
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='false'), base)
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='true'), f'{base}\n\n{uat}')
+
+    def test_tier_routes_build_host_allowed_models(self):
+        """SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_* become Host allowedModels routes."""
+        self.assertEqual(self.tier_routes(), [])
+        self.assertEqual(
+            self.tier_routes(
+                SUPERAGENT_TIER_LOW_PROVIDER='deepseek-official',
+                SUPERAGENT_TIER_LOW_MODEL='deepseek-flash',
+                SUPERAGENT_TIER_MID_PROVIDER='deepseek-official',
+                SUPERAGENT_TIER_MID_MODEL='deepseek-chat',
+                SUPERAGENT_TIER_LOW_REASONING_EFFORT='low',
+            ),
+            [
+                {'provider': 'deepseek-official', 'model': 'deepseek-flash'},
+                {'provider': 'deepseek-official', 'model': 'deepseek-chat'},
+            ],
+        )
+        # Same provider/model on both tiers yields one route (Host rejects duplicates).
+        self.assertEqual(
+            self.tier_routes(
+                SUPERAGENT_TIER_LOW_PROVIDER='deepseek-official',
+                SUPERAGENT_TIER_LOW_MODEL='deepseek-flash',
+                SUPERAGENT_TIER_MID_PROVIDER='deepseek-official',
+                SUPERAGENT_TIER_MID_MODEL='deepseek-flash',
+            ),
+            [{'provider': 'deepseek-official', 'model': 'deepseek-flash'}],
+        )
+        with self.assertRaises(SystemExit):
+            self.tier_routes(SUPERAGENT_TIER_LOW_PROVIDER='deepseek-official')
+        with self.assertRaises(SystemExit):
+            self.tier_routes(SUPERAGENT_TIER_MID_MODEL='deepseek-chat')
 
     def test_prompts_name_every_exit_code(self):
         """Both Delivery procedures name the shared contract codes 0–4."""
@@ -601,6 +648,18 @@ class ConfigureTest(unittest.TestCase):
                 text, r'(?i)(read the detail file.*fail|on (a |exit `1`.*)?fail.*detail file|detail file.*only on a fail)',
                 f'{name} must say to read the detail file on a fail',
             )
+
+    def test_prompts_map_subtasks_to_role_presets(self):
+        """Delivery names explorer / frontend / devops and which subtask kinds use each."""
+        with open(os.path.join(ROOT, 'prompts', 'delivery.md')) as file:
+            text = file.read()
+        for preset in ('explorer', 'frontend', 'devops'):
+            self.assertIn(f'`{preset}`', text, f'delivery.md must name preset {preset}')
+        self.assertRegex(text, r'(?i)(map|search|explor|locat).{0,80}`explorer`')
+        self.assertRegex(text, r'(?i)(ui|frontend|css|component).{0,80}`frontend`')
+        self.assertRegex(text, r'(?i)(build|deploy|ci|docker|infra).{0,80}`devops`')
+        self.assertRegex(text, r'(?i)(low[- ]tier|cheaper).{0,40}`explorer`|`explorer`.{0,40}(low[- ]tier|cheaper)')
+        self.assertRegex(text, r'(?i)list_subagent_models')
 
     def test_prompts_run_only_superagent_check(self):
         """Workers call superagent check; not claude-review or uat-test as the wait job."""

@@ -1,0 +1,325 @@
+# Superagent profile: loopback webserver, stateDir, worker subagent allowlist,
+# role presets (explorer / frontend / devops), and Host model-selection routes.
+# Loader replaces a row's config wholesale — see docs/adr/0001-worker-presets.md.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    stateDir: /home/agent/.dsh/state/superagent
+
+# Host authorization for explicit child model routes (ADR § Subagent model routes).
+# enabled + allowedModels come from SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_* at
+# DSH load; empty tiers leave the setting off. Configure validates the same env.
+- id: subagent-model-selection-settings
+  name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+  config:
+    enabled: !!js "((() => { const routes = []; const seen = new Set(); const add = (p, m) => { p = (p || '').trim(); m = (m || '').trim(); if (!p || !m) return; const key = p + '\\0' + m; if (seen.has(key)) return; seen.add(key); routes.push({ provider: p, model: m }); }; add(process.env.SUPERAGENT_TIER_LOW_PROVIDER, process.env.SUPERAGENT_TIER_LOW_MODEL); add(process.env.SUPERAGENT_TIER_MID_PROVIDER, process.env.SUPERAGENT_TIER_MID_MODEL); return routes; })()).length > 0"
+    allowedModels: !!js "(() => { const routes = []; const seen = new Set(); const add = (p, m) => { p = (p || '').trim(); m = (m || '').trim(); if (!p || !m) return; const key = p + '\\0' + m; if (seen.has(key)) return; seen.add(key); routes.push({ provider: p, model: m }); }; add(process.env.SUPERAGENT_TIER_LOW_PROVIDER, process.env.SUPERAGENT_TIER_LOW_MODEL); add(process.env.SUPERAGENT_TIER_MID_PROVIDER, process.env.SUPERAGENT_TIER_MID_MODEL); return routes; })()"
+
+# Full restatement of the plugin's worker preset with allowedAgentPresets on the
+# nested tool-subagent (Host top-level tool-subagent is a different row).
+- id: dsh-superagent-worker-preset
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: dsh-superagent-worker
+    name: dsh-superagent 执行器
+    description: dsh-superagent 的执行器 Session 专用，不供手动选择。前台命令超 5 秒转入后台，只含执行工作所需的工具。
+    order: 90
+    plugins:
+      - id: persona
+        name: '@deepseek-ai/dsh-persona'
+        config:
+          prefix: You are a coding agent powered by the {{model}} model.
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: 65536
+      - id: time-context
+        name: '@deepseek-ai/dsh-time-context'
+      # A foreground command waits at most 5 s, then the shell tool moves it to a background job.
+      - id: shell
+        name: cordis:group
+        group: true
+        isolate:
+          shell: true
+        config:
+          - id: bash-sandbox
+            name: '@deepseek-ai/dsh-bash-sandbox'
+            disabled: !!js process.platform === 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: pwsh-sandbox
+            name: '@deepseek-ai/dsh-pwsh-sandbox'
+            disabled: !!js process.platform !== 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
+      - id: tool-jobs
+        name: '@deepseek-ai/dsh-tool-jobs'
+        config:
+          waitTimeoutMs: 5000
+          maxWaitTimeoutMs: 5000
+      - id: skill-filesystem
+        name: '@deepseek-ai/dsh-skill-filesystem'
+      - id: tool-skill
+        name: '@deepseek-ai/dsh-tool-skill'
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+            config:
+              thresholdChars: 8192
+              headChars: 4096
+              tailChars: 1024
+      - id: delegation
+        name: cordis:group
+        group: true
+        isolate:
+          workflowEngine: true
+        config:
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+          - id: tool-subagent
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: spawn
+              toolName: subagent
+              modelSelection: true
+              modelDiscovery: true
+              agentPreset: standard
+              allowedAgentPresets:
+                - standard
+                - explorer
+                - frontend
+                - devops
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: tool-web
+        name: '@deepseek-ai/dsh-tool-web'
+        config:
+          fetch: false
+          searchTimeoutMs: 60000
+
+# Role presets workers may spawn. Personas live in roles/*.md (copied into the image).
+- insert:
+    - id: explorer-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: explorer
+        name: explorer
+        description: Map the repository; read and search only. For worker subagents, not manual selection.
+        order: 100
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: !!js process.getBuiltinModule('node:fs').readFileSync('/usr/local/share/superagent/roles/explorer.md', 'utf8')
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+    - id: frontend-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: frontend
+        name: frontend
+        description: Ship UI changes in this repository's frontend stack. For worker subagents, not manual selection.
+        order: 101
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: !!js process.getBuiltinModule('node:fs').readFileSync('/usr/local/share/superagent/roles/frontend.md', 'utf8')
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+    - id: devops-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: devops
+        name: devops
+        description: Change build, run, and ship paths — not product features. For worker subagents, not manual selection.
+        order: 102
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: !!js process.getBuiltinModule('node:fs').readFileSync('/usr/local/share/superagent/roles/devops.md', 'utf8')
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000

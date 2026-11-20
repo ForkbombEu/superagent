@@ -10,7 +10,13 @@ SANDBOX_IMAGE = 'superagent-uat-sandbox:test'
 
 
 def docker(*args, check=True, **kwargs):
-    return subprocess.run(['docker', *args], capture_output=True, text=True, check=check, **kwargs)
+    result = subprocess.run(['docker', *args], capture_output=True, text=True, check=False, **kwargs)
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout or '').strip() or f'exit {result.returncode}'
+        raise subprocess.CalledProcessError(
+            result.returncode, result.args, output=result.stdout, stderr=detail,
+        )
+    return result
 
 
 def require_docker():

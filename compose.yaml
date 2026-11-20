@@ -63,23 +63,29 @@ services:
   # Claude Code OAuth token alone); without it the chat route answers 503.
   console:
     build:
-      context: ./console
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: console/Dockerfile
     restart: unless-stopped
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SUPERAGENT_CONSOLE_MODEL: ${SUPERAGENT_CONSOLE_MODEL:-}
       SUPERAGENT_CONSOLE_API_URL: ${SUPERAGENT_CONSOLE_API_URL:-http://dashboard:8080/orchestrator/api}
-      # Public Host for Caddy forward_auth when the compose hostname is refused.
+      SUPERAGENT_CONSOLE_REPO_ROOT: /opt/console-repo
+      # Public Host when the Docker-internal Host is refused by DSH on /.
       SERVICE_FQDN_DASHBOARD: ${SERVICE_FQDN_DASHBOARD:-}
-
     expose:
       - "3000"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/console/api/health"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/console/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 5s
-      start_period: 15s
+      start_period: 60s
       retries: 3
 
 

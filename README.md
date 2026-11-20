@@ -562,6 +562,10 @@ Trust boundaries:
   `/orchestrator/api/*`; signed-out requests get 401.
 - The console service calls the management API with **GET only**, forwarding
   the caller's cookie; it has no GitHub client and only drafts issue Markdown.
+- Repo context is this Superagent tree baked into the console image at
+  `/opt/console-repo`, indexed once with `codebase-memory-mcp` at process
+  start (stale until rebuild). Confined `read_file` / `glob` / `grep`
+  fallbacks refuse path escape. No `GH_TOKEN`, no runtime clone, no writes.
 - Chat threads stay in the browser's `localStorage`; nothing is stored
   server-side.
 

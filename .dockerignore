@@ -2,4 +2,7 @@
 .env
 .env.*
 **/__pycache__
+**/node_modules
+console/dist
+console/web/dist
 superagent-uat-*.md

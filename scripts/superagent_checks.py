@@ -35,9 +35,9 @@ _VERDICT_EXIT = {
 class Result:
     """Compact check outcome for stdout and later orchestrators."""
 
-    __slots__ = ('check', 'verdict', 'sha', 'rounds_used', 'rounds_allowed', 'next_step', 'detail_file')
+    __slots__ = ('check', 'verdict', 'sha', 'rounds_used', 'rounds_allowed', 'next_step', 'detail_file', 'model')
 
-    def __init__(self, check, verdict, sha, rounds_used, rounds_allowed, next_step, detail_file):
+    def __init__(self, check, verdict, sha, rounds_used, rounds_allowed, next_step, detail_file, model=None):
         self.check = check
         self.verdict = verdict
         self.sha = sha
@@ -45,6 +45,7 @@ class Result:
         self.rounds_allowed = rounds_allowed
         self.next_step = next_step
         self.detail_file = detail_file
+        self.model = model
 
 
 def history_dir(check, repository, number):
@@ -63,6 +64,8 @@ def print_result(result):
         print(f'{result.check}: rounds {result.rounds_used} of {allowed}')
     if result.next_step:
         print(f'{result.check}: next {result.next_step}')
+    if result.model:
+        print(f'{result.check}: model {result.model}')
     print(f'{result.check}: {result.verdict} for {result.sha}')
     return _VERDICT_EXIT.get(result.verdict, Exit.RETRY)
 

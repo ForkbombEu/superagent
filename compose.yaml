@@ -33,6 +33,9 @@ services:
       # Optional Claude Code reviewer model and effort (scripts/claude-review).
       SUPERAGENT_REVIEWER_MODEL: ${SUPERAGENT_REVIEWER_MODEL:-}
       SUPERAGENT_REVIEWER_EFFORT: ${SUPERAGENT_REVIEWER_EFFORT:-}
+      # Optional cheaper model for small diffs (scripts/claude-review); threshold defaults to 200 lines.
+      SUPERAGENT_REVIEWER_SMALL_MODEL: ${SUPERAGENT_REVIEWER_SMALL_MODEL:-}
+      SUPERAGENT_REVIEWER_SMALL_DIFF_LINES: ${SUPERAGENT_REVIEWER_SMALL_DIFF_LINES:-}
       # Optional user acceptance tests (README "User acceptance tests"): true adds
       # the UAT step to the Delivery requirements and gives the worker uat-test,
       # which only *requests* runs from uat-gate with the shared token. The

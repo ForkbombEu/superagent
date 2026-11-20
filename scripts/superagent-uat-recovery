@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Resume a ticket when its detached UAT job has reached a durable verdict.
 
-A worker records ``Waiting for UAT: PR #<number> at <full sha>`` before it ends
-its turn for a background uat-test invocation.  DSH normally resumes the worker
-when that command exits; this sidecar closes the gap when that wake-up is lost.
-It asks the trusted UAT gate for the already-requested run and retries the ticket
-only after the gate says that run is complete.  The retried worker reads the
-retained marker and continues from uat-test's durable result.
+A worker records ``Waiting for checks: PR #<number> at <full sha>`` (or the
+older ``Waiting for UAT: …`` form) before it ends its turn for a background
+``superagent check`` (or legacy uat-test) invocation.  DSH normally resumes the
+worker when that command exits; this sidecar closes the gap when that wake-up
+is lost.  It asks the trusted UAT gate for the already-requested run and retries
+the ticket only after the gate says that run is complete.  The retried worker
+reads the retained marker and continues from the durable check result.
 """
 import json
 import os
@@ -22,7 +23,7 @@ HEADERS = {'x-orchestrator-request': '1', 'content-type': 'application/json'}
 UAT_CONFIG = '/run/superagent-secrets/uat.json'
 INTERVAL_SECONDS = 60
 MAX_RETRIES = 3
-WAITING = re.compile(r'^Waiting for UAT: PR #(\d+) at ([0-9a-f]{40})$', re.IGNORECASE)
+WAITING = re.compile(r'^Waiting for (?:checks|UAT): PR #(\d+) at ([0-9a-f]{40})$', re.IGNORECASE)
 # Worker wording seen before and after the durable marker was introduced.
 RETRY_WAITING = re.compile(r'waiting on the UAT retry for PR #(\d+)', re.IGNORECASE)
 LEGACY_WAITING = re.compile(r'waiting on a fresh UAT run for head ([0-9a-f]{7,40})', re.IGNORECASE)

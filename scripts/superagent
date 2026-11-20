@@ -3,8 +3,8 @@
 
 `check` resolves repository, PR and head, then either prints the plan
 (`--dry-run`) or runs the next missing check under a per-PR lock.
-`merge --dry-run` re-reads head and title and reports whether every Delivery
-merge condition holds (without merging).
+`merge` re-reads head and title, checks every Delivery merge condition, then
+squash-merges with `--match-head-commit` (or `--dry-run` reports only).
 """
 import fcntl
 import json
@@ -350,7 +350,8 @@ def unmet(name, sha):
     finish('PRECONDITION', sha, next_step=name)
 
 
-def dry_run_merge():
+def evaluate_merge():
+    """Check every Delivery merge condition; exit on unmet. Return repo, number, sha, title."""
     repository, number, sha = resolve()
     pr = pr_snapshot(repository, number)
     if pr['headRefOid'] != sha:
@@ -377,8 +378,28 @@ def dry_run_merge():
     if changes_requested(pr.get('reviews')):
         unmet('changes requested', sha)
 
+    return repository, number, sha, title
+
+
+def dry_run_merge():
+    _repository, _number, sha, _title = evaluate_merge()
     finish('PASS', sha, next_step='merge')
 
+
+def run_merge():
+    repository, number, sha, title = evaluate_merge()
+    subject = f'{title} (#{number})'
+    result = checks.gh(
+        'pr', 'merge', str(number),
+        '--squash',
+        '--match-head-commit', sha,
+        '--subject', subject,
+        '--repo', repository,
+    )
+    if result.returncode:
+        message = (result.stderr or result.stdout or 'merge refused').strip()
+        fail(message, checks.Exit.BLOCKED)
+    finish('PASS', sha, next_step='done')
 
 
 def main(args):
@@ -388,7 +409,9 @@ def main(args):
         run_check()
     if args == ['merge', '--dry-run']:
         dry_run_merge()
-    fail(f'usage: {CHECK} check [--dry-run] | merge --dry-run', checks.Exit.PRECONDITION)
+    if args == ['merge']:
+        run_merge()
+    fail(f'usage: {CHECK} check [--dry-run] | merge [--dry-run]', checks.Exit.PRECONDITION)
 
 
 if __name__ == '__main__':

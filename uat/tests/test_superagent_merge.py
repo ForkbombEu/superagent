@@ -1,8 +1,9 @@
-"""superagent merge --dry-run: every Delivery merge condition as an exit code.
+"""superagent merge: Delivery merge conditions and the squash merge.
 
-Seam under test: the scripts/superagent CLI `merge --dry-run` (exit status,
-stdout compact result / next:, whether uat-test --verify runs). fake_gh stands
-in for pr view / checks / ready / reviews; a PATH stub stands in for uat-test.
+Seam under test: the scripts/superagent CLI `merge` / `merge --dry-run` (exit
+status, stdout compact result / next:, whether uat-test --verify runs, whether
+`gh pr merge` is invoked). fake_gh stands in for pr view / checks / ready /
+reviews / merge; a PATH stub stands in for uat-test.
 """
 import json
 import os
@@ -37,12 +38,14 @@ class SuperagentMergeHarness(unittest.TestCase):
         self.gh = fg.FakeGitHub(REPOSITORY)
         self.addCleanup(self.gh.close)
         self.ticket, self.sha = self._make_ticket(branch=BRANCH)
+        self.merge_log = os.path.join(self.dir, 'merge.log')
         self.environ = {
             **os.environ,
             'HOME': self.home,
             'PATH': f'{self.bin}:{os.environ["PATH"]}',
             'FAKE_GITHUB_URL': self.gh.url,
             'FAKE_GITHUB_TOKEN': fg.CODER_TOKEN,
+            'FAKE_GH_MERGE_LOG': self.merge_log,
             'SUPERAGENT_GH': os.path.join(self.bin, 'gh'),
             'DSH_SUPERAGENT_GITHUB_REPOSITORY': REPOSITORY,
         }
@@ -141,6 +144,14 @@ raise SystemExit({exit_code})
             return [json.loads(line) for line in file if line.strip()]
 
 
+
+    def _merge_calls(self):
+        if not os.path.exists(self.merge_log):
+            return []
+        with open(self.merge_log, encoding='utf-8') as file:
+            return [json.loads(line) for line in file if line.strip()]
+
+
 class SuperagentMergeDryRunTest(SuperagentMergeHarness):
     def test_draft_names_mark_ready(self):
         self._add_ready_pr(draft=True)
@@ -227,6 +238,33 @@ class SuperagentMergeDryRunTest(SuperagentMergeHarness):
         result = self.run_merge('merge', '--dry-run')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn('superagent: next merge', result.stdout)
+
+
+
+class SuperagentMergeRunTest(SuperagentMergeHarness):
+    def test_merge_squash_with_match_head_commit(self):
+        self._add_ready_pr()
+        self._seed_review('PASS')
+        result = self.run_merge('merge')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('superagent: next done', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f'superagent: PASS for {self.sha}'))
+        self.assertEqual(self._merge_calls(), [[
+            'pr', 'merge', '9',
+            '--squash',
+            '--match-head-commit', self.sha,
+            '--subject', f'{TITLE} (#9)',
+            '--repo', REPOSITORY,
+        ]])
+
+    def test_github_refusal_exits_blocked_with_message(self):
+        self._add_ready_pr()
+        self._seed_review('PASS')
+        message = 'GraphQL: Pull Request is not mergeable'
+        result = self.run_merge('merge', FAKE_GH_FAIL_MERGE=message)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn(message, result.stderr)
+        self.assertEqual(self._merge_calls(), [])
 
 
 if __name__ == '__main__':

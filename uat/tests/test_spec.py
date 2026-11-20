@@ -28,6 +28,9 @@ Depends on #12
 
 
 class ParseTest(unittest.TestCase):
+    def test_ci_deliberate_fail_drop_me(self):
+        self.fail('deliberate fail to prove CI goes red')
+
     def test_absent_section_is_not_required(self):
         for body in (None, '', '@forkboteu Do X.\n\n## Acceptance criteria\n- [ ] X\n\nDepends on #3'):
             self.assertEqual(spec.parse(body).status, spec.NOT_REQUIRED)

@@ -130,7 +130,7 @@ step 1 so CI runs on every push.
 - **Done when:** in a local `docker compose up`, the icon opens the chat inside
   the panel, and the Superagent panel still loads.
 
-### 4. Read and draft tools
+### 4. Read, draft, and repo-context tools
 
 - Verify first: from the `console` container, a GET to
   `http://dashboard:8080/orchestrator/api/state` with a valid cookie answers 200.
@@ -143,10 +143,35 @@ step 1 so CI runs on every push.
   keys matching token, key, secret or password redacted), `get_prompts`,
   `draft_issue` (returns Markdown in the issue format; writes nothing). No
   GitHub client in the service.
-- **Tests:** each tool against a mocked `fetch`; the client refuses non-GET;
-  redaction; the cookie is forwarded and never logged.
+- **Repo context (required):** Opus must answer from this deployment's source,
+  not only the system prompt.
+  - Bake the Superagent git tree into the console image at
+    `SUPERAGENT_CONSOLE_REPO_ROOT` (default `/opt/console-repo`) via `COPY` in
+    `console/Dockerfile` (same commit as the image). Do not clone at runtime and
+    do not use `GH_TOKEN`.
+  - Install `codebase-memory-mcp` and `@ai-sdk/mcp`. On server start, index that
+    root once (`codebase-memory-mcp cli … index_repository`) and keep a
+    process-lifetime MCP client (stdio `StdioClientTransport` / AI SDK stdio is
+    fine inside the same container). Pass `mcpClient.tools()` into `streamText`
+    alongside the orchestrator tools.
+  - Add thin read-only fallbacks `read_file`, `glob`, `grep` confined under
+    `SUPERAGENT_CONSOLE_REPO_ROOT` (refuse path escape); use them when MCP is
+    down or for raw file reads.
+  - System prompt: prefer graph/MCP tools for structure ("who calls X"),
+    filesystem tools for file contents; say the index is this image's Superagent
+    tree (stale until rebuild).
+  - Out of scope for this PR: indexing the live `GITHUB_REPOSITORY` target, the
+    DSH `@lovedolove/dsh-codebase-memory-mcp` worker plugin, and DSH Remote
+    workspace-file RPC.
+- **Tests:** each orchestrator tool against a mocked `fetch`; the client refuses
+  non-GET; redaction; the cookie is forwarded and never logged. Filesystem tools
+  refuse paths outside the repo root. Chat route with a stub MCP tool list
+  includes at least one codebase-memory tool name in `streamText`'s tools (or a
+  test double of the MCP merge). Missing Anthropic key still → 503 with no
+  provider or MCP calls that spend the key.
 - **Done when:** asked "what is ticket X waiting for", Opus answers from the
-  live API on a local deployment.
+  live API; asked about a symbol or file in this repo, it uses MCP and/or the
+  filesystem tools against `/opt/console-repo` on a local deployment.
 
 ### 5. Keep threads and restore consistency
 

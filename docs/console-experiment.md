@@ -8,9 +8,10 @@ what landed here.
 - **Branch:** `feat/console` from `attesta`.
 - **PR:** into `attesta`, titled `feat(console): chat with Opus about the deployment's design`.
   A person decides the merge; Coolify redeploys `attesta` on push.
-- **Settled, not to reopen:** the chat is a hosted service (Next.js, assistant-ui,
-  AI SDK) and DSH only gets a doorway plugin. D5 (one `ANTHROPIC_API_KEY`) and
-  D6 (gates stay CLI checks) apply.
+- **Settled, not to reopen:** the chat is a hosted service (a Vite + React page
+  with assistant-ui, served by a Hono server that also runs the AI SDK) and DSH
+  only gets a doorway plugin. No Next.js and no other full-stack framework.
+  D5 (one `ANTHROPIC_API_KEY`) and D6 (gates stay CLI checks) apply.
 
 ## Shape
 
@@ -19,7 +20,7 @@ DSH web UI ── left-sidebar icon ── main panel: <iframe src="/console/">
                                           │ same origin, DSH session cookie
 dashboard (Caddy :8080) ── /console* ── forward_auth superagent:3083 ── console:3000
                                                                          │ streamText
-console (Next.js, basePath /console) ── Anthropic API (ANTHROPIC_API_KEY)
+console (Hono: dist/ + /console/api/*) ── Anthropic API (ANTHROPIC_API_KEY)
         └─ tools: GET http://dashboard:8080/orchestrator/api/* with the caller's cookie
 ```
 
@@ -66,12 +67,15 @@ step 1 so CI runs on every push.
 
 ### 1. Service behind the dashboard
 
-- Scaffold with the assistant-ui CLI (Next.js, AI SDK template), then trim to
-  one page with `<Thread />`. `next.config`: `basePath: '/console'`,
-  `output: 'standalone'`. `console/Dockerfile`: multi-stage on `node:24-alpine`,
-  runs the standalone server on port 3000 as a non-root user.
-- The chat transport's API URL is written out as `/console/api/chat`: `basePath`
-  prefixes pages and links, not `fetch` URLs.
+- `console/web/`: a Vite + React page (`base: '/console/'`) rendering
+  assistant-ui's `<Thread />` with its AI SDK runtime; the chat transport's API
+  URL is `/console/api/chat`. Follow assistant-ui's own setup docs for a plain
+  React app rather than its Next.js template.
+- `console/server.ts`: a Hono app on `@hono/node-server`, port 3000: serves
+  `web/dist` under `/console/` (SPA fallback to `index.html`) and mounts
+  `/console/api/*`. Export the app so tests call `app.request()` without a
+  socket. `console/Dockerfile`: multi-stage on `node:24-alpine` (build the page,
+  then run the server with production dependencies only), non-root user.
 - `compose.yaml`: service `console`, `build: ./console`, `expose: ["3000"]`,
   a `healthcheck` on a `/console/api/health` route, no Coolify domain variable.
   `dashboard` does not `depends_on` it: a broken console must not block the
@@ -91,7 +95,7 @@ step 1 so CI runs on every push.
 
 ### 2. Stream Opus
 
-- `console/app/api/chat/route.ts`: `streamText` with `@ai-sdk/anthropic`; model
+- `POST /console/api/chat` in `console/server.ts` (or a module it mounts): `streamText` with `@ai-sdk/anthropic`; model
   `SUPERAGENT_CONSOLE_MODEL`, defaulting to the current Opus model id named in
   the `@ai-sdk/anthropic` docs (pin it; note the source in the commit).
 - System prompt in `console/prompts/system.md`, read at start: what the
@@ -182,5 +186,5 @@ says it is not configured. Workers, review and UAT run as before.
   and the Node test cover it.
 - The prototype is built against 0.2.1-era client packages; inject only what
   `apply` uses.
-- assistant-ui and Next.js versions move fast; pin exact versions in
+- assistant-ui, the AI SDK and Vite move fast; pin exact versions in
   `console/package.json` and commit the lockfile.

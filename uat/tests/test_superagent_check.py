@@ -1,7 +1,7 @@
-"""superagent check --dry-run: resolve repo/PR/head and list stored results for that head.
+"""superagent check: dry-run plan and run-path for the next check on a PR head.
 
-Seam under test: the scripts/superagent CLI (exit status, stdout/stderr). Does not run
-uat-test or claude-review.
+Seam under test: the scripts/superagent CLI (exit status, stdout/stderr, whether
+uat-test / claude-review are invoked). Fakes stand in for those commands.
 """
 import json
 import os
@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 from uat.tests import fake_github as fg
@@ -23,7 +24,7 @@ BRANCH = 'agent/ticket'
 TITLE = 'feat: sample change'
 
 
-class SuperagentCheckDryRunTest(unittest.TestCase):
+class SuperagentCheckHarness(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -84,6 +85,7 @@ class SuperagentCheckDryRunTest(unittest.TestCase):
         os.makedirs(path, exist_ok=True)
         return path
 
+class SuperagentCheckDryRunTest(SuperagentCheckHarness):
     def test_no_pr_exits_precondition(self):
         result = self.run_check('check', '--dry-run')
         self.assertEqual(result.returncode, 4, result.stderr)
@@ -124,6 +126,207 @@ class SuperagentCheckDryRunTest(unittest.TestCase):
         self.assertEqual(lines[0], f'superagent check: {REPOSITORY}#9 at {self.sha}')
         self.assertIn(f'uat-test: result for {self.sha} ({uat_name})', lines)
         self.assertIn(f'claude-review: PASS for {self.sha}', lines)
+        self.assertNotIn('unexpected call', result.stderr)
+
+
+class SuperagentCheckRunTest(SuperagentCheckHarness):
+    """F2.2: lock, run the next missing check, aggregate with next:, budget failed reviews."""
+
+    def setUp(self):
+        super().setUp()
+        self.uat_log = os.path.join(self.dir, 'uat-calls')
+        self.review_log = os.path.join(self.dir, 'review-calls')
+        self.uat_config = os.path.join(self.dir, 'uat.json')
+        with open(self.uat_config, 'w', encoding='utf-8') as file:
+            json.dump({'gate_url': 'http://127.0.0.1:9', 'token': 't'}, file)
+        self.environ['UAT_TEST_CONFIG'] = self.uat_config
+        self.gh.add_pr(9, self.sha, closes=[7], title=TITLE, head_ref=BRANCH)
+        self._install_uat(verdict='PASS')
+        self._install_review(verdict='PASS')
+
+    def _install_uat(self, verdict='PASS', hold_path=None, exit_code=None):
+        if exit_code is None:
+            exit_code = {'PASS': 0, 'NOT_REQUIRED': 0, 'FAIL': 1, 'BLOCKED': 2, 'RETRY': 3}.get(verdict, 1)
+        hold_literal = 'None' if hold_path is None else json.dumps(hold_path)
+        path = os.path.join(self.bin, 'uat-test')
+        script = f'''#!/usr/bin/env python3
+import json, os, sys, time
+log = os.environ["SUPERAGENT_UAT_LOG"]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+hold = {hold_literal}
+if hold:
+    with open(hold, "w", encoding="utf-8") as marker:
+        marker.write("held\\n")
+    while os.path.exists(hold):
+        time.sleep(0.05)
+repository, number, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+home = os.environ["HOME"]
+directory = os.path.join(home, ".local", "state", "uat-test", repository, f"pr-{{number}}")
+os.makedirs(directory, exist_ok=True)
+name = f"20260101T000000Z-{{sha[:12]}}.md"
+report = os.path.join(directory, name)
+with open(report, "w", encoding="utf-8") as handle:
+    handle.write("# UAT {verdict}\\n")
+with open(os.path.join(directory, f"{{sha}}.json"), "w", encoding="utf-8") as handle:
+    json.dump({{"sha": sha, "verdict": "{verdict}"}}, handle)
+    handle.write("\\n")
+print(f"uat-test: detail {{report}}")
+print(f"uat-test: {verdict} for {{sha}}")
+raise SystemExit({exit_code})
+'''
+        with open(path, 'w', encoding='utf-8') as file:
+            file.write(script)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.environ['SUPERAGENT_UAT_LOG'] = self.uat_log
+
+    def _install_review(self, verdict='PASS', exit_code=None):
+        if exit_code is None:
+            exit_code = {'PASS': 0, 'FAIL': 1, 'BLOCKED': 2, 'RETRY': 3}.get(verdict, 1)
+        path = os.path.join(self.bin, 'claude-review')
+        script = f'''#!/usr/bin/env python3
+import json, os, sys
+log = os.environ["SUPERAGENT_REVIEW_LOG"]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+repository, number, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+home = os.environ["HOME"]
+directory = os.path.join(home, ".local", "state", "claude-review", repository, f"pr-{{number}}")
+os.makedirs(directory, exist_ok=True)
+stem = f"{{sha}}-deadbeefcafe"
+detail = os.path.join(directory, f"{{stem}}.md")
+with open(detail, "w", encoding="utf-8") as handle:
+    handle.write("review\\n")
+with open(os.path.join(directory, f"{{stem}}.json"), "w", encoding="utf-8") as handle:
+    json.dump({{"sha": sha, "title": {TITLE!r}, "verdict": "{verdict}", "answer": "ok"}}, handle)
+    handle.write("\\n")
+if "{verdict}" == "FAIL":
+    print(f"claude-review: detail {{detail}}")
+    print("claude-review: rounds 1 of 3")
+    print("claude-review: next failed reviews so far: {{stem}}.md")
+print(f"claude-review: {verdict} for {{sha}}")
+raise SystemExit({exit_code})
+'''
+        with open(path, 'w', encoding='utf-8') as file:
+            file.write(script)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        self.environ['SUPERAGENT_REVIEW_LOG'] = self.review_log
+
+    def _calls(self, log):
+        if not os.path.exists(log):
+            return []
+        with open(log, encoding='utf-8') as file:
+            return [json.loads(line) for line in file if line.strip()]
+
+    def _seed_uat(self, verdict='PASS'):
+        directory = self._history('uat-test')
+        name = f'20260101T000000Z-{self.sha[:12]}.md'
+        with open(os.path.join(directory, name), 'w', encoding='utf-8') as file:
+            file.write(f'# UAT {verdict}\\n')
+        with open(os.path.join(directory, f'{self.sha}.json'), 'w', encoding='utf-8') as file:
+            json.dump({'sha': self.sha, 'verdict': verdict}, file)
+            file.write('\n')
+        return name
+
+    def _seed_review(self, verdict='PASS', sha=None, stem_suffix='deadbeefcafe'):
+        sha = sha or self.sha
+        directory = self._history('claude-review')
+        stem = f'{sha}-{stem_suffix}'
+        with open(os.path.join(directory, f'{stem}.md'), 'w', encoding='utf-8') as file:
+            file.write('review\\n')
+        with open(os.path.join(directory, f'{stem}.json'), 'w', encoding='utf-8') as file:
+            json.dump({'sha': sha, 'title': TITLE, 'verdict': verdict, 'answer': 'ok'}, file)
+            file.write('\n')
+        return stem
+
+    def test_uat_fail_stops_before_review(self):
+        self._install_uat(verdict='FAIL')
+        result = self.run_check('check')
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(self._calls(self.review_log), [])
+        self.assertIn('superagent: next ', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f'superagent: FAIL for {self.sha}'))
+
+    def test_uat_pass_then_review_runs(self):
+        self._install_uat(verdict='PASS')
+        self._install_review(verdict='PASS')
+        first = self.run_check('check')
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(self._calls(self.review_log), [])
+        second = self.run_check('check')
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(len(self._calls(self.review_log)), 1)
+        self.assertIn('superagent: next ', second.stdout)
+        self.assertTrue(second.stdout.rstrip().endswith(f'superagent: PASS for {self.sha}'))
+
+    def test_third_run_reuses_both_stored_results(self):
+        self._install_uat(verdict='PASS')
+        self._install_review(verdict='PASS')
+        self.assertEqual(self.run_check('check').returncode, 0)
+        self.assertEqual(self.run_check('check').returncode, 0)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(len(self._calls(self.review_log)), 1)
+        third = self.run_check('check')
+        self.assertEqual(third.returncode, 0, third.stderr + third.stdout)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(len(self._calls(self.review_log)), 1)
+        self.assertIn('superagent: next ', third.stdout)
+        self.assertTrue(third.stdout.rstrip().endswith(f'superagent: PASS for {self.sha}'))
+
+    def test_concurrent_second_call_waits_on_lock(self):
+        hold = os.path.join(self.dir, 'uat-hold')
+        self._install_uat(verdict='PASS', hold_path=hold)
+        self._install_review(verdict='PASS')
+        first = subprocess.Popen(
+            [sys.executable, SCRIPT, 'check'],
+            cwd=self.ticket, env=self.environ,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(100):
+            if os.path.exists(hold):
+                break
+            time.sleep(0.05)
+        else:
+            first.kill()
+            self.fail('uat-test never took the hold')
+        second = subprocess.Popen(
+            [sys.executable, SCRIPT, 'check'],
+            cwd=self.ticket, env=self.environ,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(0.3)
+        self.assertIsNone(second.poll(), 'second check should still be waiting on the lock')
+        os.remove(hold)
+        first_code = first.wait(timeout=10)
+        second_code = second.wait(timeout=10)
+        first_err = first.stderr.read() if first.stderr else ''
+        second_err = second.stderr.read() if second.stderr else ''
+        if first.stdout:
+            first.stdout.close()
+        if first.stderr:
+            first.stderr.close()
+        if second.stdout:
+            second.stdout.close()
+        if second.stderr:
+            second.stderr.close()
+        self.assertEqual(first_code, 0, first_err)
+        self.assertEqual(second_code, 0, second_err)
+        self.assertEqual(len(self._calls(self.uat_log)), 1)
+        self.assertEqual(len(self._calls(self.review_log)), 1)
+
+    def test_fourth_failed_review_is_blocked(self):
+        self._seed_uat('PASS')
+        for index in range(3):
+            other = f'{"%040d" % (index + 1)}'
+            self._seed_review('FAIL', sha=other, stem_suffix=f'fail{index}')
+        self._forbid('claude-review')
+        result = self.run_check('check')
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn('superagent: next ', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f'superagent: BLOCKED for {self.sha}'))
         self.assertNotIn('unexpected call', result.stderr)
 
 

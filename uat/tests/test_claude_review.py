@@ -1,4 +1,7 @@
 """claude-review through the shared check contract: storage, reuse, exit codes, compact fail output."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
 import json
 import os
 import shutil
@@ -34,7 +37,9 @@ def answer_for(sha, verdict='PASS', summary='Looks good.', fix='None.'):
     ''')
 
 
-class ClaudeReviewTest(unittest.TestCase):
+class ClaudeReviewHarness(unittest.TestCase):
+    """Shared fake gh/claude ticket fixture for claude-review tests."""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -134,6 +139,42 @@ class ClaudeReviewTest(unittest.TestCase):
                 reviews.append(json.load(file))
         return reviews
 
+    def write_review_config(self, **fields):
+        payload = {'env': {'ANTHROPIC_API_KEY': 'test-key'}, 'model': 'opus', **fields}
+        with open(self.config, 'w', encoding='utf-8') as file:
+            json.dump(payload, file)
+
+    def commit_lines(self, count, name='change.txt'):
+        """Add a commit with `count` lines; keep origin/main as the base behind HEAD."""
+        path = os.path.join(self.ticket, name)
+        with open(path, 'w', encoding='utf-8') as file:
+            file.write('\n'.join(f'line-{i}' for i in range(count)) + '\n')
+        subprocess.run(['git', '-C', self.ticket, 'add', name], check=True)
+        subprocess.run(
+            ['git', '-C', self.ticket, '-c', 'user.name=t', '-c', 'user.email=t@t',
+             'commit', '-q', '-m', f'add {count} lines'],
+            check=True,
+        )
+        self.sha = subprocess.run(
+            ['git', '-C', self.ticket, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        parent = subprocess.run(
+            ['git', '-C', self.ticket, 'rev-parse', 'HEAD~1'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ['git', '-C', self.ticket, 'push', '-q', '--force', 'origin', f'{parent}:refs/heads/main'],
+            check=True,
+        )
+        subprocess.run(
+            ['git', '-C', self.ticket, 'push', '-q', '--force', 'origin', f'{self.sha}:refs/heads/head'],
+            check=True,
+        )
+        self.gh.prs[9]['head']['sha'] = self.sha
+        return self.sha
+
+class ClaudeReviewTest(ClaudeReviewHarness):
     def test_pass_stores_review_and_prints_compact_result(self):
         self.set_answer('PASS')
         result = self.run_review()
@@ -215,3 +256,203 @@ class ClaudeReviewTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def load_claude_review():
+    path = SCRIPT
+    loader = importlib.machinery.SourceFileLoader('claude_review', path)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader('claude_review', loader))
+    sys.modules['claude_review'] = module
+    loader.exec_module(module)
+    return module
+
+
+class ReviewerModelSelectionTest(unittest.TestCase):
+    """Unit: pick small vs large reviewer from config and changed-line count."""
+
+    def setUp(self):
+        self.review = load_claude_review()
+
+    def test_unset_small_model_keeps_single_model(self):
+        self.assertEqual(
+            self.review.select_reviewer_model({'model': 'opus'}, 10),
+            'opus',
+        )
+        self.assertEqual(
+            self.review.select_reviewer_model({'model': 'opus', 'small_model': ''}, 10),
+            'opus',
+        )
+        self.assertEqual(
+            self.review.select_reviewer_model({'model': ''}, 500),
+            '',
+        )
+
+    def test_small_diff_uses_small_model_at_default_threshold(self):
+        config = {'model': 'opus', 'small_model': 'haiku', 'small_diff_lines': 200}
+        self.assertEqual(self.review.select_reviewer_model(config, 0), 'haiku')
+        self.assertEqual(self.review.select_reviewer_model(config, 200), 'haiku')
+        self.assertEqual(self.review.select_reviewer_model(config, 201), 'opus')
+
+    def test_missing_threshold_defaults_to_200(self):
+        config = {'model': 'opus', 'small_model': 'haiku'}
+        self.assertEqual(self.review.select_reviewer_model(config, 200), 'haiku')
+        self.assertEqual(self.review.select_reviewer_model(config, 201), 'opus')
+
+    def test_custom_threshold(self):
+        config = {'model': 'opus', 'small_model': 'haiku', 'small_diff_lines': 50}
+        self.assertEqual(self.review.select_reviewer_model(config, 50), 'haiku')
+        self.assertEqual(self.review.select_reviewer_model(config, 51), 'opus')
+
+    def test_count_changed_lines_sums_numstat(self):
+        origin = os.path.join(tempfile.mkdtemp(), 'repo')
+        self.addCleanup(shutil.rmtree, os.path.dirname(origin), True)
+        subprocess.run(['git', 'init', '-q', origin], check=True)
+        subprocess.run(['git', '-C', origin, 'branch', '-M', 'main'], check=True)
+        subprocess.run(
+            ['git', '-C', origin, '-c', 'user.name=t', '-c', 'user.email=t@t',
+             'commit', '-q', '--allow-empty', '-m', 'base'],
+            check=True,
+        )
+        base = subprocess.run(
+            ['git', '-C', origin, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        path = os.path.join(origin, 'file.txt')
+        with open(path, 'w', encoding='utf-8') as file:
+            file.write('\n'.join(f'line-{i}' for i in range(12)) + '\n')
+        subprocess.run(['git', '-C', origin, 'add', 'file.txt'], check=True)
+        subprocess.run(
+            ['git', '-C', origin, '-c', 'user.name=t', '-c', 'user.email=t@t',
+             'commit', '-q', '-m', 'add lines'],
+            check=True,
+        )
+        sha = subprocess.run(
+            ['git', '-C', origin, 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        cwd = os.getcwd()
+        try:
+            os.chdir(origin)
+            self.assertEqual(self.review.count_changed_lines(base, sha), 12)
+        finally:
+            os.chdir(cwd)
+
+
+class EntrypointClaudeReviewConfigTest(unittest.TestCase):
+    """superagent-entrypoint.sh writes small-model routing into claude-review.json."""
+
+    def write_config(self, **environ):
+        """Run the entrypoint's claude-review.json writer with the given env."""
+        script = Path(ROOT) / 'scripts' / 'superagent-entrypoint.sh'
+        source = script.read_text(encoding='utf-8')
+        start = source.index("python3 > /run/superagent-secrets/claude-review.json <<'PY'")
+        start = source.index('\n', start) + 1
+        end = source.index('\nPY\n', start)
+        code = source[start:end]
+        env = {
+            'PATH': os.environ.get('PATH', ''),
+            'HOME': os.environ.get('HOME', ''),
+            **environ,
+        }
+        result = subprocess.run(
+            [sys.executable, '-c', code],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_unset_small_model_keeps_today_json_shape(self):
+        data = self.write_config(ANTHROPIC_API_KEY='k', SUPERAGENT_REVIEWER_MODEL='opus')
+        self.assertEqual(data['model'], 'opus')
+        self.assertEqual(data['env'], {'ANTHROPIC_API_KEY': 'k'})
+        self.assertNotIn('small_model', data)
+        self.assertNotIn('small_diff_lines', data)
+
+    def test_small_model_and_default_threshold_go_into_json(self):
+        data = self.write_config(
+            ANTHROPIC_API_KEY='k',
+            SUPERAGENT_REVIEWER_MODEL='opus',
+            SUPERAGENT_REVIEWER_SMALL_MODEL='haiku',
+        )
+        self.assertEqual(data['model'], 'opus')
+        self.assertEqual(data['small_model'], 'haiku')
+        self.assertEqual(data['small_diff_lines'], 200)
+
+    def test_custom_small_diff_lines(self):
+        data = self.write_config(
+            CLAUDE_CODE_OAUTH_TOKEN='tok',
+            SUPERAGENT_REVIEWER_MODEL='opus',
+            SUPERAGENT_REVIEWER_SMALL_MODEL='haiku',
+            SUPERAGENT_REVIEWER_SMALL_DIFF_LINES='75',
+        )
+        self.assertEqual(data['small_diff_lines'], 75)
+        self.assertEqual(data['env'], {'CLAUDE_CODE_OAUTH_TOKEN': 'tok'})
+
+
+class ReviewerModelRoutingTest(ClaudeReviewHarness):
+    """Route Claude by diff size: --model, compact result, comment, reuse by model."""
+
+    def test_single_model_passed_to_claude_and_shown(self):
+        self.write_review_config(model='test-model')
+        self.set_answer('PASS')
+        result = self.run_review()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.claude_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn('--model', calls[0])
+        self.assertEqual(calls[0][calls[0].index('--model') + 1], 'test-model')
+        self.assertIn('claude-review: model test-model', result.stdout.splitlines())
+        self.assertIn('test-model', self.gh.comments[0]['body'])
+        self.assertEqual(self.stored_reviews()[0].get('model'), 'test-model')
+
+    def test_small_diff_uses_small_model(self):
+        self.write_review_config(model='opus', small_model='haiku', small_diff_lines=200)
+        self.commit_lines(10)
+        self.set_answer('PASS')
+        result = self.run_review()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.claude_calls()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'haiku')
+        self.assertIn('claude-review: model haiku', result.stdout.splitlines())
+        self.assertIn('haiku', self.gh.comments[0]['body'])
+
+    def test_large_diff_uses_large_model(self):
+        self.write_review_config(model='opus', small_model='haiku', small_diff_lines=200)
+        self.commit_lines(201)
+        self.set_answer('PASS')
+        result = self.run_review()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.claude_calls()[0]
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        self.assertIn('claude-review: model opus', result.stdout.splitlines())
+
+    def test_reuse_only_for_same_model_choice(self):
+        self.write_review_config(model='opus', small_model='haiku', small_diff_lines=200)
+        self.commit_lines(10)
+        self.set_answer('PASS', summary='small model review')
+        first = self.run_review()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(len(self.claude_calls()), 1)
+        # Same sha/title but force the large model via a lower threshold → new review.
+        self.write_review_config(model='opus', small_model='haiku', small_diff_lines=5)
+        self.set_answer('FAIL', summary='large model review', fix='1. Fix.')
+        second = self.run_review()
+        self.assertEqual(second.returncode, 1, second.stderr)
+        self.assertEqual(len(self.claude_calls()), 2)
+        models = {row.get('model') for row in self.stored_reviews()}
+        self.assertEqual(models, {'haiku', 'opus'})
+        # Re-run with the small threshold again → reuse haiku, no third Claude call.
+        self.write_review_config(model='opus', small_model='haiku', small_diff_lines=200)
+        third = self.run_review()
+        self.assertEqual(third.returncode, 0, third.stderr)
+        self.assertEqual(len(self.claude_calls()), 2)
+        self.assertIn('claude-review: model haiku', third.stdout.splitlines())
+
+    def test_empty_model_omits_model_line(self):
+        self.write_review_config(model='')
+        self.set_answer('PASS')
+        result = self.run_review()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(line.startswith('claude-review: model ') for line in result.stdout.splitlines()))
+        args = self.claude_calls()[0]
+        self.assertNotIn('--model', args)

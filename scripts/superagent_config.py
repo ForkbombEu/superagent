@@ -20,9 +20,14 @@ import jsonschema
 import yaml
 
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(DIRECTORY)
+# Repo layout: scripts/superagent_config.py → repo root. Image layout: script
+# sits next to superagent.yaml / superagent.schema.json under share/superagent.
+ROOT = (
+    DIRECTORY
+    if os.path.isfile(os.path.join(DIRECTORY, 'superagent.schema.json'))
+    else os.path.dirname(DIRECTORY)
+)
 SCHEMA_PATH = os.path.join(ROOT, 'superagent.schema.json')
-# Image path F6.2/F6.3 will use; F6.1 only documents it.
 DEPLOYMENT_CONFIG_PATH = '/usr/local/share/superagent/superagent.yaml'
 
 

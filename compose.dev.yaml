@@ -1,0 +1,14 @@
+# Local browser access only. Coolify uses compose.yaml alone and must not load
+# this file (it would publish 8080 on the host). Prefer `task dev` / `task stop`
+# (Taskfile.yml); equivalent:
+#
+#   docker compose -f compose.yaml -f compose.dev.yaml up --build
+services:
+  dashboard:
+    ports:
+      - "8080:8080"
+  superagent:
+    # Host the browser sends must match --trusted-host / --public-url.
+    environment:
+      SERVICE_URL_DASHBOARD: http://localhost:8080
+      SERVICE_FQDN_DASHBOARD: localhost

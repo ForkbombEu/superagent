@@ -1,0 +1,16 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  COMPOSE: docker compose -f compose.yaml -f compose.dev.yaml
+
+tasks:
+  dev:
+    desc: Start the local stack (dashboard on localhost:8080)
+    cmds:
+      - '{{.COMPOSE}} up --build'
+
+  stop:
+    desc: Stop the local stack
+    cmds:
+      - '{{.COMPOSE}} stop'

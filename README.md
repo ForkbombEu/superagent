@@ -71,7 +71,14 @@ panel shows the DSH default as `provider / model`.
 
 **Security**: whoever can read the container log can read the launch-token
 URL and open the UI. The DSH workers execute code and have repository
-credentials. Do not directly publish 3082, 3083 or 8080.
+credentials. Do not directly publish 3082, 3083 or 8080 on Coolify. For a
+local browser, use [`compose.dev.yaml`](compose.dev.yaml) (publishes only
+`8080` and sets the trusted host to `localhost`):
+
+```bash
+task dev    # docker compose -f compose.yaml -f compose.dev.yaml up --build
+task stop   # stop the local stack
+```
 
 ## 2. Deploy, validate and open
 
@@ -117,6 +124,12 @@ unset optional variable leaves its setting to the panel. The Ticket directory
 root stays empty, which already means `/home/agent/.dsh/state/superagent/work`.
 The script logs each save, or the reason a save was refused, with the
 prefix `superagent-configure:` in the `superagent` service log.
+
+On every DSH start, the `superagent-console` host plugin also registers
+`$HOME/src/<repo>` (from `GITHUB_REPOSITORY`, the same checkout the entrypoint
+clones) as the primary Workspace and drops a bare `/tmp` registration when
+present, so New Session → Claude opens on that git tree. Ticket worktrees under
+`prepare-worktree` stay separate Workspaces.
 
 Configure the rest in the panel: prompts and a review
 policy appropriate for your project. Default proactive accept mode `observe`
@@ -549,7 +562,9 @@ the superagent image, on every pull request (`.github/workflows/test.yml`).
 
 The Opus console is a same-origin chat behind the dashboard cookie gate. Open
 it from the DSH web UI: the left-sidebar **Console** icon opens a main panel
-iframe of `/console/`.
+iframe of `/console/`. Locally, start with `compose.dev.yaml` (see Setup) and
+open `http://localhost:8080/` with the launch-token URL from the `superagent`
+log.
 
 It needs `ANTHROPIC_API_KEY` on the `console` service (the Claude Code OAuth
 token alone is not enough). Without that key the page says chat is not

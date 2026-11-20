@@ -63,10 +63,18 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
-COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
+COPY dsh/primary-workspace /opt/superagent-primary-workspace
+RUN chown -R agent:agent /opt/superagent-primary-workspace
+
+COPY scripts/gh-agent scripts/claude-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/gh-agent \
+# DSH strips *_KEY/*_TOKEN from child shells; shadow npm's `claude` so every
+# invocation (dsh-claude, claude-review) reloads credentials from tmpfs.
+RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
+ && ln -s /usr/local/bin/claude-agent /usr/local/bin/claude \
+ && chmod 0755 /usr/local/bin/gh-agent \
+    /usr/local/bin/claude-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
@@ -88,6 +96,8 @@ USER agent
 RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
+    dsh plugin --profile superagent add 'link:/opt/superagent-primary-workspace'; \
+    dsh plugin --profile superagent add '@norman-else/dsh-claude@0.1.67'; \
     mkdir -p "$DSH_HOME/state/superagent"; \
     printf '%s\n' \
       '- id: webserver' \

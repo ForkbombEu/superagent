@@ -541,6 +541,14 @@ Run the tests with `python3 -m unittest discover -s uat/tests -t .`; those
 that need Docker build the images and drive real DSH against a scripted model
 (`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them).
 
+## Claude in DSH (`dsh-claude`)
+
+The image installs [`@norman-else/dsh-claude`](https://github.com/Norman-else/dsh-claude)
+so you can chat with Claude Code inside the normal DSH UI (Agent Preset **Claude**),
+using `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) via `scripts/claude-agent`.
+New sessions default to the git checkout at `$HOME/src/<repo>` from
+`GITHUB_REPOSITORY` (host plugin `superagent-primary-workspace`).
+
 ## 6. Operational notes and limitations
 
 - Keep existing service name `superagent` and volume `superagent_home` when

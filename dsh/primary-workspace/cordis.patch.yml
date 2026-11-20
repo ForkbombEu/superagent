@@ -1,0 +1,4 @@
+# Host-only: promote the Superagent git checkout as the primary Workspace.
+- insert:
+    - id: superagent-primary-workspace
+      name: superagent-primary-workspace

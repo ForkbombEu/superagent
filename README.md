@@ -45,27 +45,30 @@ After the first deploy, check under **Environment Variables** that
 versions include the scheme there, which DSH refuses at startup
 (`trustedHosts entry … is not a bare host[:port] authority`).
 
-Configure Environment Variables:
+Configure Environment Variables. Model and tier settings default from
+[`superagent.yaml`](superagent.yaml); a set env var overrides the file (env
+wins). Secrets and operational flags have no yaml key.
 
-| Variable                                         | Description                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `DEEPSEEK_API_KEY`                               | Model provider secret (runtime only)                                                                                                                                                                                                                                                                                                                                                       |
-| `GH_TOKEN`                                       | GitHub classic PAT for dedicated agent account (runtime only)                                                                                                                                                                                                                                                                                                                              |
-| `GITHUB_REPOSITORY`                              | e.g. `ForkbombEu/credimi-attestbook`                                                                                                                                                                                                                                                                                                                                                       |
-| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token`                                                                                                                                                                                                                                                                 |
-| `SUPERAGENT_REVIEWER_MODEL`                      | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses Claude Code's default for the account                                                                                                                                                                                                                                            |
-| `SUPERAGENT_REVIEWER_EFFORT`                     | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`)                                                                                                                                                                                                                                                                |
-| `SUPERAGENT_REVIEWER_SMALL_MODEL`                | Optional. Cheaper Claude Code model for small diffs; empty keeps a single `SUPERAGENT_REVIEWER_MODEL`                                                                                                                                                                                                                                                                                     |
-| `SUPERAGENT_REVIEWER_SMALL_DIFF_LINES`           | Optional. Changed-line threshold for the small model (default `200` when the small model is set)                                                                                                                                                                                                                                                                                          |
-| `SUPERAGENT_UAT_ENABLED`                         | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` and `uat-runner` services, which start only with `COMPOSE_PROFILES=uat`; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
-| `COMPOSE_PROFILES`                               | Optional. `uat` starts the UAT services (`uat-gate`, and the privileged `uat-runner`); leave it unset while UAT is off. Set it together with `SUPERAGENT_UAT_ENABLED=true`                                                                                                                                                                                                                 |
-| `SUPERAGENT_GITHUB_ALLOWED_USERS`                | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino`                                                                                                                                                                                                                                                                                           |
-| `SUPERAGENT_EXECUTOR_PROVIDER`                   | Optional. Executor model provider id, e.g. `deepseek-official`                                                                                                                                                                                                                                                                                                                             |
-| `SUPERAGENT_EXECUTOR_MODEL`                      | Optional, required with the provider. Executor model id, e.g. `deepseek-flash`                                                                                                                                                                                                                                                                                                             |
-| `SUPERAGENT_EXECUTOR_REASONING_EFFORT`           | Optional. Executor reasoning effort; empty uses the model default                                                                                                                                                                                                                                                                                                                          |
-| `SUPERAGENT_MAX_WORKERS`                         | Optional. Tickets worked on at the same time, 1–16 (panel default 3)                                                                                                                                                                                                                                                                                                                       |
-| `SUPERAGENT_TIER_LOW_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Low-tier subagent route (e.g. `explorer`). Provider and model together; effort optional. Empty leaves Host model selection off                                                                                                                                                                                                                                      |
-| `SUPERAGENT_TIER_MID_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Mid-tier subagent route (e.g. `frontend`, `devops`). Same shape as the low tier                                                                                                                                                                                                                                                                                     |
+| Variable | Description | `superagent.yaml` key |
+| -------- | ----------- | --------------------- |
+| `DEEPSEEK_API_KEY` | Model provider secret (runtime only) | — (secret) |
+| `GH_TOKEN` | GitHub classic PAT for dedicated agent account (runtime only) | — (secret) |
+| `GITHUB_REPOSITORY` | e.g. `ForkbombEu/credimi-attestbook` | — |
+| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token` | — (secret) |
+| `SUPERAGENT_REVIEWER_MODEL` | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses `roles.reviewer` → its tier's `claude` | `tiers.<reviewer.tier>.claude` |
+| `SUPERAGENT_REVIEWER_EFFORT` | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`) | — (env only) |
+| `SUPERAGENT_REVIEWER_SMALL_MODEL` | Optional. Cheaper Claude Code model for small diffs; empty uses the reviewer `route` tier's `claude` | `tiers.<reviewer.route.tier>.claude` |
+| `SUPERAGENT_REVIEWER_SMALL_DIFF_LINES` | Optional. Changed-line threshold for the small model; empty uses the file | `roles.reviewer.route.when.diff_lines_below` |
+| `SUPERAGENT_UAT_ENABLED` | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` and `uat-runner` services, which start only with `COMPOSE_PROFILES=uat`; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) | — |
+| `COMPOSE_PROFILES` | Optional. `uat` starts the UAT services (`uat-gate`, and the privileged `uat-runner`); leave it unset while UAT is off. Set it together with `SUPERAGENT_UAT_ENABLED=true` | — |
+| `SUPERAGENT_GITHUB_ALLOWED_USERS` | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino` | — |
+| `SUPERAGENT_EXECUTOR_PROVIDER` | Optional. Executor model provider id, e.g. `deepseek-official`; empty uses the implementer tier | `tiers.<implementer.tier>.dsh.provider` |
+| `SUPERAGENT_EXECUTOR_MODEL` | Optional, required with the provider. Executor model id, e.g. `deepseek-flash` | `tiers.<implementer.tier>.dsh.model` |
+| `SUPERAGENT_EXECUTOR_REASONING_EFFORT` | Optional. Executor reasoning effort; empty uses the file / model default | `tiers.<implementer.tier>.dsh.reasoningEffort` |
+| `SUPERAGENT_MAX_WORKERS` | Optional. Tickets worked on at the same time, 1–16 (panel default 3) | — |
+| `SUPERAGENT_TIER_LOW_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Low-tier subagent route (e.g. `explorer`). Provider and model together; effort optional. Empty uses `tiers.low.dsh` | `tiers.low.dsh.provider` / `.model` / `.reasoningEffort` |
+| `SUPERAGENT_TIER_MID_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Mid-tier subagent route (e.g. `frontend`, `devops`). Same shape as the low tier | `tiers.mid.dsh.provider` / `.model` / `.reasoningEffort` |
+| `SUPERAGENT_UAT_PROVIDER` / `SUPERAGENT_UAT_MODEL` | Optional. UAT tester model; empty → uat-gate fills from the file | `tiers.<uat-tester.tier>.dsh.provider` / `.model` |
 
 Provider and model ids are the ones the panel's model fields accept; the
 panel shows the DSH default as `provider / model`.
@@ -100,34 +103,35 @@ browser or after 30 days.
 
 ## 3. Superagent configuration
 
-On every start, `scripts/superagent-configure` waits for DSH and saves these
-settings through the management API, so a new deployment starts configured:
+Deployment-owned [`superagent.yaml`](superagent.yaml) sets tiers and role models.
+On every start, the entrypoint re-applies the Host profile patch from the file
+(with `$SUPERAGENT_*` overrides), writes reviewer settings into
+`claude-review.json`, and `scripts/superagent-configure` waits for DSH and
+saves these settings through the management API:
 
 | Setting                                                         | Value                                                                                                                                                                                                    |
 | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Sources > GitHub > Repository                                   | `$GITHUB_REPOSITORY`                                                                                                                                                                                     |
 | Sources > GitHub > Agent GitHub CLI                             | `/usr/local/bin/gh-agent`                                                                                                                                                                                |
 | Eval > On each Source > GitHub accounts that may originate work | `$SUPERAGENT_GITHUB_ALLOWED_USERS`, when set                                                                                                                                                             |
-| Execution > Executor model                                      | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set                                                                                         |
+| Execution > Executor model                                      | `roles.implementer` (via its tier's `dsh`), overridden by `$SUPERAGENT_EXECUTOR_*` when set                                                                                                              |
 | Execution > Concurrent Tickets                                  | `$SUPERAGENT_MAX_WORKERS`, when set                                                                                                                                                                      |
 | Execution > Prepare command                                     | `/usr/local/bin/prepare-worktree.sh`                                                                                                                                                                     |
 | Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): run `superagent check`, follow `next:`, then `superagent merge` and follow `next:`; followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
 
 Worker subagent model routes are **not** written through this management API.
 They come from the profile patch on Host `subagent-model-selection-settings`
-([ADR](docs/adr/0001-worker-presets.md)): when `$SUPERAGENT_TIER_LOW_*` /
-`$SUPERAGENT_TIER_MID_*` are set, DSH enables the setting and fills
-`allowedModels` at load. `superagent-configure` validates the same variables
-(half-set tier → exit) so a bad Coolify config fails at start. Delivery maps
-map/search → `explorer` (low tier), UI → `frontend` (mid), build/deploy/CI →
-`devops` (mid). Unlisted presets stay rejected by the F5.2 allowlist. To verify
-on a deployment: set both tiers, open a worker session, call
-`list_subagent_models`, spawn `explorer` with the low-tier route, and confirm an
-unknown preset is refused.
+([ADR](docs/adr/0001-worker-presets.md)): `tiers.low` / `tiers.mid` at build,
+re-applied at start (so `$SUPERAGENT_TIER_*` still wins). Configure fails fast
+on a half-set tier. Delivery maps map/search → `explorer` (low tier), UI →
+`frontend` (mid), build/deploy/CI → `devops` (mid). Unlisted presets stay
+rejected by the F5.2 allowlist. To verify on a deployment: open a worker
+session, call `list_subagent_models`, spawn `explorer` with the low-tier route,
+and confirm an unknown preset is refused.
 
-These values win over panel edits: change them in Coolify and redeploy. An
-unset optional variable leaves its setting to the panel. The Ticket directory
-root stays empty, which already means `/home/agent/.dsh/state/superagent/work`.
+File values (and set env overrides) win over panel edits for the fields above.
+Secrets stay in Coolify. The Ticket directory root stays empty, which already
+means `/home/agent/.dsh/state/superagent/work`.
 The script logs each save, or the reason a save was refused, with the
 prefix `superagent-configure:` in the `superagent` service log.
 

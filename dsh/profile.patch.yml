@@ -10,9 +10,8 @@
     stateDir: /home/agent/.dsh/state/superagent
 
 # Host authorization for explicit child model routes (ADR § Subagent model routes).
-# enabled + allowedModels are baked from superagent.yaml tiers at image build (F6.2).
-# Start-time SUPERAGENT_TIER_* env still validated by configure; wiring that back
-# into this Host setting is F6.3.
+# enabled + allowedModels come from superagent.yaml tiers (build) and are
+# re-applied at start with SUPERAGENT_TIER_* env overrides (entrypoint --apply-env).
 - id: subagent-model-selection-settings
   name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
   config:

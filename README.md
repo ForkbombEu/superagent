@@ -547,7 +547,10 @@ that need Docker build the images and drive real DSH against a scripted model
   migrating from the previous package. Docker Compose/Coolify may still
   rename/prefix volume names; **confirm the deployed volume before migration**.
 - `superagent:3083` exists on the internal Compose network only. The outer
-  Coolify Caddy proxy should route only to `dashboard:8080`.
+  Coolify Caddy proxy should route only to `dashboard:8080`. Docker and Coolify
+  probe `GET /healthz` on that service (answered by the inner Caddy, not DSH);
+  the `superagent` container has its own healthcheck, and `dashboard` waits for
+  it before starting.
 - DSH itself uses `--public-url` and `--trusted-host` to support the external
   URL. If your pinned DSH CLI version does not recognize those flags, you may
   need to upgrade its version rather than removing the host security check.

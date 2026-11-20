@@ -3,12 +3,16 @@
 Validates against superagent.schema.json, resolves Role tiers into concrete
 models, then applies environment overrides (env wins). Callers must pass an
 absolute path under the deployment or image — never a pull-request checkout.
+
+Also renders the DSH profile patch at image build (`render-profile` CLI / 
+`render_profile_patch`).
 """
 from __future__ import annotations
 
 import copy
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -16,9 +20,14 @@ import jsonschema
 import yaml
 
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(DIRECTORY)
+# Repo layout: scripts/superagent_config.py → repo root. Image layout: script
+# sits next to superagent.yaml / superagent.schema.json under share/superagent.
+ROOT = (
+    DIRECTORY
+    if os.path.isfile(os.path.join(DIRECTORY, 'superagent.schema.json'))
+    else os.path.dirname(DIRECTORY)
+)
 SCHEMA_PATH = os.path.join(ROOT, 'superagent.schema.json')
-# Image path F6.2/F6.3 will use; F6.1 only documents it.
 DEPLOYMENT_CONFIG_PATH = '/usr/local/share/superagent/superagent.yaml'
 
 
@@ -349,3 +358,339 @@ def load(path: str, environ: Mapping[str, str] | None = None) -> ResolvedConfig:
     )
     _apply_env(resolved, environ if environ is not None else os.environ)
     return resolved
+
+
+# --- Profile patch rendering (F6.2, image build) ---------------------------------
+
+ROLES_IMAGE_DIR = '/usr/local/share/superagent/roles'
+
+# Known role presets: description and whether the filesystem tools are read-only.
+# Unknown subagent names fall back to a generic writable preset.
+_ROLE_PRESET_META = {
+    'explorer': {
+        'description': (
+            'Map the repository; read and search only. '
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': True,
+    },
+    'frontend': {
+        'description': (
+            "Ship UI changes in this repository's frontend stack. "
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': False,
+    },
+    'devops': {
+        'description': (
+            'Change build, run, and ship paths — not product features. '
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': False,
+    },
+}
+
+# Stable allowlist / insert order for today's roles (then any extras, sorted).
+_PREFERRED_SUBAGENT_ORDER = ('explorer', 'frontend', 'devops')
+
+
+def _ordered_subagent_names(subagents: Mapping[str, Any]) -> list[str]:
+    names = set(subagents)
+    ordered = [name for name in _PREFERRED_SUBAGENT_ORDER if name in names]
+    ordered.extend(sorted(names - set(ordered)))
+    return ordered
+
+
+def _persona_image_path(instructions: str) -> str:
+    return f'{ROLES_IMAGE_DIR}/{os.path.basename(instructions)}'
+
+
+def _render_host_model_routes(routes: list[dict[str, str]]) -> str:
+    enabled = 'true' if routes else 'false'
+    if not routes:
+        models = '[]'
+    else:
+        lines = []
+        for route in routes:
+            lines.append(f"      - provider: {route['provider']}")
+            lines.append(f"        model: {route['model']}")
+        models = '\n' + '\n'.join(lines)
+    return f"""# Host authorization for explicit child model routes (ADR § Subagent model routes).
+# enabled + allowedModels are baked from superagent.yaml tiers at image build (F6.2).
+# Start-time SUPERAGENT_TIER_* env still validated by configure; wiring that back
+# into this Host setting is F6.3.
+- id: subagent-model-selection-settings
+  name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+  config:
+    enabled: {enabled}
+    allowedModels:{models if routes else ' []'}"""
+
+
+def _render_allowlist(names: list[str]) -> str:
+    items = ['standard', *names]
+    return '\n'.join(f'                - {item}' for item in items)
+
+
+def _render_worker_preset(allowlist: str) -> str:
+    return f"""# Full restatement of the plugin's worker preset with allowedAgentPresets on the
+# nested tool-subagent (Host top-level tool-subagent is a different row).
+- id: dsh-superagent-worker-preset
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: dsh-superagent-worker
+    name: dsh-superagent 执行器
+    description: dsh-superagent 的执行器 Session 专用，不供手动选择。前台命令超 5 秒转入后台，只含执行工作所需的工具。
+    order: 90
+    plugins:
+      - id: persona
+        name: '@deepseek-ai/dsh-persona'
+        config:
+          prefix: You are a coding agent powered by the {{{{model}}}} model.
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: 65536
+      - id: time-context
+        name: '@deepseek-ai/dsh-time-context'
+      # A foreground command waits at most 5 s, then the shell tool moves it to a background job.
+      - id: shell
+        name: cordis:group
+        group: true
+        isolate:
+          shell: true
+        config:
+          - id: bash-sandbox
+            name: '@deepseek-ai/dsh-bash-sandbox'
+            disabled: !!js process.platform === 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: pwsh-sandbox
+            name: '@deepseek-ai/dsh-pwsh-sandbox'
+            disabled: !!js process.platform !== 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
+      - id: tool-jobs
+        name: '@deepseek-ai/dsh-tool-jobs'
+        config:
+          waitTimeoutMs: 5000
+          maxWaitTimeoutMs: 5000
+      - id: skill-filesystem
+        name: '@deepseek-ai/dsh-skill-filesystem'
+      - id: tool-skill
+        name: '@deepseek-ai/dsh-tool-skill'
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+            config:
+              thresholdChars: 8192
+              headChars: 4096
+              tailChars: 1024
+      - id: delegation
+        name: cordis:group
+        group: true
+        isolate:
+          workflowEngine: true
+        config:
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+          - id: tool-subagent
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: spawn
+              toolName: subagent
+              modelSelection: true
+              modelDiscovery: true
+              agentPreset: standard
+              allowedAgentPresets:
+{allowlist}
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: tool-web
+        name: '@deepseek-ai/dsh-tool-web'
+        config:
+          fetch: false
+          searchTimeoutMs: 60000"""
+
+
+def _render_fs_plugin(read_only: bool) -> str:
+    if read_only:
+        return """          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+              applyPatch: false"""
+    return """          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false"""
+
+
+def _render_role_preset(name: str, instructions: str, order: int) -> str:
+    meta = _ROLE_PRESET_META.get(name) or {
+        'description': f'{name} role preset. For worker subagents, not manual selection.',
+        'read_only': False,
+    }
+    persona = _persona_image_path(instructions)
+    description = meta['description']
+    fs_plugin = _render_fs_plugin(bool(meta['read_only']))
+    return f"""    - id: {name}-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: {name}
+        name: {name}
+        description: {description}
+        order: {order}
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: !!js process.getBuiltinModule('node:fs').readFileSync('{persona}', 'utf8')
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+{fs_plugin}
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000"""
+
+
+def render_profile_patch(config: ResolvedConfig) -> str:
+    """Render the Superagent DSH profile patch (cordis.patch.yml text).
+
+    Presets, the worker allowlist, and Host model routes come from `config`
+    (loaded from superagent.yaml). Webserver, stateDir, and the worker preset
+    restatement stay deployment constants. Persona files are read at DSH load
+    from ROLES_IMAGE_DIR via !!js.
+    """
+    implementer = config.roles.get('implementer') or {}
+    subagents = implementer.get('subagents') or {}
+    names = _ordered_subagent_names(subagents)
+    allowlist = _render_allowlist(names)
+    routes = list(config.tier_routes)
+
+    role_blocks = []
+    for index, name in enumerate(names):
+        instructions = subagents[name]['instructions']
+        role_blocks.append(_render_role_preset(name, instructions, order=100 + index))
+
+    insert = '- insert:\n' + '\n'.join(role_blocks) if role_blocks else ''
+
+    parts = [
+        '# Superagent profile: loopback webserver, stateDir, worker subagent allowlist,',
+        '# role presets, and Host model-selection routes — generated from superagent.yaml',
+        '# at image build (F6.2). See docs/adr/0001-worker-presets.md.',
+        '- id: webserver',
+        '  config:',
+        '    host: 127.0.0.1',
+        '    port: 3082',
+        '- id: dsh-superagent',
+        '  config:',
+        '    stateDir: /home/agent/.dsh/state/superagent',
+        '',
+        _render_host_model_routes(routes),
+        '',
+        _render_worker_preset(allowlist),
+        '',
+        '# Role presets workers may spawn. Personas live in roles/*.md (copied into the image).',
+        insert,
+        '',
+    ]
+    return '\n'.join(parts)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: `render-profile <absolute-yaml> [--output path]` for image build."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog='superagent_config')
+    sub = parser.add_subparsers(dest='command', required=True)
+    render = sub.add_parser('render-profile', help='Render cordis.patch.yml from superagent.yaml')
+    render.add_argument('path', help='Absolute path to superagent.yaml')
+    render.add_argument('--output', '-o', help='Write here instead of stdout')
+    args = parser.parse_args(argv)
+
+    if args.command == 'render-profile':
+        # Build-time: file only — do not apply host env (F6.3 wires start-time).
+        resolved = load(args.path, environ={})
+        text = render_profile_patch(resolved)
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as file:
+                file.write(text)
+        else:
+            sys.stdout.write(text)
+        return 0
+    return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

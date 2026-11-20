@@ -57,7 +57,7 @@ class ProfileDumpConfigTest(unittest.TestCase):
                 f'persona path missing for {preset}',
             )
 
-        # Host model-selection settings: !!js unevaluated, env names must appear.
+        # Host model-selection settings: baked from superagent.yaml at image build.
         self.assertIn('subagent-model-selection-settings', dump)
-        self.assertIn('SUPERAGENT_TIER_LOW_PROVIDER', dump)
-        self.assertIn('SUPERAGENT_TIER_MID_MODEL', dump)
+        self.assertIn('deepseek-official', dump)
+        self.assertIn('deepseek-flash', dump)

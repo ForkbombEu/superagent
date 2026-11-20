@@ -22,13 +22,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends gh; \
     rm -rf /var/lib/apt/lists/*
 
-# Match the version in upstream docs/006-deployment.md. Claude Code is the PR
-# reviewer that scripts/claude-review runs.
+# Upstream docs/006-deployment.md still pins dsh 0.2.1-rc.3 and the plugin
+# declares ^0.2.1-alpha.2: recheck the plugin starts when either moves.
+# Claude Code is the PR reviewer that scripts/claude-review runs.
 # BuildKit cache mounts keep downloaded packages on the build host between
 # deployments (even when layers are rebuilt) and out of the image/volume.
 RUN --mount=type=cache,target=/var/cache/npm \
     npm install --global --prefer-offline --cache /var/cache/npm \
-      @deepseek-ai/dsh@0.2.1-rc.3 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
+      @deepseek-ai/dsh@0.2.2-rc.5 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
 
 # mise installs each target repository's toolchain from its mise.toml (see
 # prepare-worktree.sh and claude-review); the release is checked against its

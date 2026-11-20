@@ -10,8 +10,8 @@ converges these fields, overwriting panel edits of the same fields:
 - Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
   optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
 - Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
-- Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, the Claude
-  Code review and squash-merge procedure, followed by delivery-uat.md, the user
+- Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, run
+  superagent check then squash-merge, followed by delivery-uat.md, the user
   acceptance tests procedure, when $SUPERAGENT_UAT_ENABLED is true
 
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;

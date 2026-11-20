@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""superagent check: the next step for a pull request head.
+
+Resolves repository, PR and head, then either prints the plan (`--dry-run`) or
+runs the next missing check under a per-PR lock: `uat-test` when UAT is on and
+has no result for the head, else `claude-review` when it has none. Aggregates
+into one compact result with `next:`. Three failed reviews on the PR → exit 2.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import superagent_checks as checks
+
+CHECK = 'superagent'
+UAT_CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
+MAX_FAILED_REVIEWS = 3
+PASS_VERDICTS = {'PASS', 'NOT_REQUIRED'}
+
+
+def fail(message, status=checks.Exit.PRECONDITION):
+    print(f'{CHECK}: {message}', file=sys.stderr)
+    sys.exit(status)
+
+
+def git(*args):
+    result = subprocess.run(['git', *args], capture_output=True, text=True)
+    if result.returncode:
+        fail(f'git {" ".join(args)} failed: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def resolve():
+    repository = os.environ.get('DSH_SUPERAGENT_GITHUB_REPOSITORY', '').strip()
+    if not repository:
+        fail('DSH_SUPERAGENT_GITHUB_REPOSITORY is not set')
+    sha = git('rev-parse', 'HEAD')
+    view = checks.gh('pr', 'view', '--repo', repository, '--json', 'number,headRefOid')
+    if view.returncode:
+        fail('no pull request for the current branch')
+    pr = json.loads(view.stdout)
+    number, head = pr['number'], pr['headRefOid']
+    if head != sha:
+        behind = subprocess.run(['git', 'merge-base', '--is-ancestor', sha, head], capture_output=True)
+        if behind.returncode == 0:
+            fail(f'local HEAD is behind the PR head {head}: run git pull')
+        fail(f'the PR head is {head}, not {sha}: run against the current head')
+    return repository, number, sha
+
+
+def uat_on():
+    return os.path.exists(UAT_CONFIG)
+
+
+def stored_uat_report(directory, sha):
+    if not os.path.isdir(directory):
+        return None
+    marker = f'-{sha[:12]}.md'
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(marker):
+            return name
+    return None
+
+
+def stored_uat_verdict(directory, sha):
+    path = os.path.join(directory, f'{sha}.json')
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding='utf-8') as file:
+        data = json.load(file)
+    if data.get('sha') != sha:
+        return None
+    return data.get('verdict')
+
+
+def write_uat_verdict(directory, sha, verdict):
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f'{sha}.json')
+    with open(path, 'w', encoding='utf-8') as file:
+        json.dump({'sha': sha, 'verdict': verdict}, file)
+        file.write('\n')
+
+
+def stored_review(directory, sha):
+    if not os.path.isdir(directory):
+        return None
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith('.json'):
+            continue
+        path = os.path.join(directory, name)
+        with open(path, encoding='utf-8') as file:
+            data = json.load(file)
+        if data.get('sha') == sha:
+            data['_stem'] = name[:-5]
+            data['_path'] = path
+            return data
+    return None
+
+
+def failed_reviews(directory):
+    if not os.path.isdir(directory):
+        return []
+    names = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith('.json'):
+            continue
+        path = os.path.join(directory, name)
+        with open(path, encoding='utf-8') as file:
+            data = json.load(file)
+        if data.get('verdict') == 'FAIL':
+            names.append(f'{name[:-5]}.md')
+    return names
+
+
+def lock_path(repository, number):
+    return os.path.join(checks.history_dir(CHECK, repository, number), 'lock')
+
+
+def acquire_lock(repository, number):
+    path = lock_path(repository, number)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = open(path, 'a+', encoding='utf-8')
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def parse_child_verdict(stdout, command, sha):
+    match = re.search(rf'^{re.escape(command)}: ([A-Z_]+) for {re.escape(sha)}$', stdout, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def parse_child_detail(stdout, command):
+    match = re.search(rf'^{re.escape(command)}: detail (.+)$', stdout, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def parse_child_rounds(stdout, command):
+    match = re.search(rf'^{re.escape(command)}: rounds (\d+) of (\d+|\?)$', stdout, re.MULTILINE)
+    if not match:
+        return None, None
+    allowed = None if match.group(2) == '?' else int(match.group(2))
+    return int(match.group(1)), allowed
+
+
+def run_command(command, repository, number, sha):
+    result = subprocess.run(
+        [command, repository, str(number), sha],
+        capture_output=True, text=True,
+    )
+    if result.stdout:
+        # Child progress lines stay visible for long UAT waits; compact lines are re-aggregated.
+        sys.stderr.write(result.stderr)
+        # Keep non-compact child stdout on stderr so the aggregate owns stdout.
+        for line in result.stdout.splitlines():
+            if not line.startswith(f'{command}:'):
+                print(line, file=sys.stderr, flush=True)
+    elif result.stderr:
+        sys.stderr.write(result.stderr)
+    verdict = parse_child_verdict(result.stdout, command, sha)
+    if not verdict:
+        if result.returncode == checks.Exit.PRECONDITION:
+            fail(result.stderr.strip() or f'{command} failed precondition', checks.Exit.PRECONDITION)
+        fail(result.stderr.strip() or f'{command} produced no verdict', checks.Exit.RETRY)
+    return result.returncode, verdict, result.stdout
+
+
+def next_for(verdict, *, review_pending=False, failed=None):
+    if verdict in PASS_VERDICTS:
+        return 'run superagent check' if review_pending else 'done'
+    if verdict == 'FAIL':
+        if failed is not None:
+            return (
+                f'failed reviews so far: {", ".join(failed)}'
+                if failed else 'failed reviews so far: (none)'
+            )
+        return 'fix and push'
+    if verdict == 'BLOCKED':
+        return 'stop'
+    if verdict == 'RETRY':
+        return 'retry'
+    return 'stop'
+
+
+def finish(verdict, sha, *, next_step, detail_file=None, rounds_used=None, rounds_allowed=None):
+    code = checks.print_result(checks.Result(
+        check=CHECK, verdict=verdict, sha=sha,
+        rounds_used=rounds_used, rounds_allowed=rounds_allowed,
+        next_step=next_step, detail_file=detail_file,
+    ))
+    sys.exit(code)
+
+
+def dry_run():
+    repository, number, sha = resolve()
+    print(f'{CHECK} check: {repository}#{number} at {sha}')
+    uat_dir = checks.history_dir('uat-test', repository, number)
+    review_dir = checks.history_dir('claude-review', repository, number)
+    uat = stored_uat_report(uat_dir, sha)
+    if uat:
+        print(f'uat-test: result for {sha} ({uat})')
+    else:
+        print(f'uat-test: no result for {sha}')
+    review = stored_review(review_dir, sha)
+    if review:
+        print(f'claude-review: {review["verdict"]} for {sha}')
+    else:
+        print(f'claude-review: no result for {sha}')
+    sys.exit(checks.Exit.PASS)
+
+
+def run_check():
+    repository, number, sha = resolve()
+    uat_dir = checks.history_dir('uat-test', repository, number)
+    review_dir = checks.history_dir('claude-review', repository, number)
+    lock = acquire_lock(repository, number)
+    try:
+        review = stored_review(review_dir, sha)
+        uat_report = stored_uat_report(uat_dir, sha)
+        uat_verdict = stored_uat_verdict(uat_dir, sha)
+
+        if uat_on() and not uat_report:
+            _code, verdict, stdout = run_command('uat-test', repository, number, sha)
+            write_uat_verdict(uat_dir, sha, verdict)
+            detail = parse_child_detail(stdout, 'uat-test')
+            rounds_used, rounds_allowed = parse_child_rounds(stdout, 'uat-test')
+            pending = verdict in PASS_VERDICTS and not stored_review(review_dir, sha)
+            finish(
+                verdict, sha,
+                next_step=next_for(verdict, review_pending=pending),
+                detail_file=detail if verdict == 'FAIL' else None,
+                rounds_used=rounds_used, rounds_allowed=rounds_allowed,
+            )
+
+        if uat_on() and uat_report and uat_verdict and uat_verdict not in PASS_VERDICTS:
+            # Known stored non-pass stops before review. A report without a sidecar
+            # (uat-test run outside superagent) falls through; claude-review verifies.
+            detail = os.path.join(uat_dir, uat_report) if uat_verdict == 'FAIL' else None
+            finish(uat_verdict, sha, next_step=next_for(uat_verdict), detail_file=detail)
+
+        failed = failed_reviews(review_dir)
+        if not review and len(failed) >= MAX_FAILED_REVIEWS:
+            finish(
+                'BLOCKED', sha,
+                next_step='stop: three failed reviews',
+                rounds_used=len(failed), rounds_allowed=MAX_FAILED_REVIEWS,
+            )
+
+        if not review:
+            _code, verdict, stdout = run_command('claude-review', repository, number, sha)
+            failed = failed_reviews(review_dir)
+            detail = parse_child_detail(stdout, 'claude-review')
+            rounds_used, rounds_allowed = parse_child_rounds(stdout, 'claude-review')
+            if verdict == 'FAIL':
+                rounds_used = len(failed)
+                rounds_allowed = MAX_FAILED_REVIEWS
+            finish(
+                verdict, sha,
+                next_step=next_for(verdict, failed=failed if verdict == 'FAIL' else None),
+                detail_file=detail if verdict == 'FAIL' else None,
+                rounds_used=rounds_used, rounds_allowed=rounds_allowed,
+            )
+
+        # Both results for this head are already stored.
+        verdict = review['verdict']
+        failed = failed_reviews(review_dir)
+        detail = None
+        rounds_used = rounds_allowed = None
+        if verdict == 'FAIL':
+            detail = os.path.join(review_dir, f'{review["_stem"]}.md')
+            rounds_used = len(failed)
+            rounds_allowed = MAX_FAILED_REVIEWS
+        finish(
+            verdict, sha,
+            next_step=next_for(verdict, failed=failed if verdict == 'FAIL' else None),
+            detail_file=detail,
+            rounds_used=rounds_used, rounds_allowed=rounds_allowed,
+        )
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def main(args):
+    if args == ['check', '--dry-run']:
+        dry_run()
+    if args == ['check']:
+        run_check()
+    fail(f'usage: {CHECK} check [--dry-run]', checks.Exit.PRECONDITION)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

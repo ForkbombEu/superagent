@@ -32,9 +32,10 @@ class FakeGitHub:
     def add_issue(self, number, body):
         self.issues[number] = {'number': number, 'body': body, 'updated_at': f'2026-11-09T10:00:{number % 60:02d}Z'}
 
-    def add_pr(self, number, sha, closes, fork=False, title='feat: x'):
+    def add_pr(self, number, sha, closes, fork=False, title='feat: x', head_ref='agent/ticket'):
         self.prs[number] = {'number': number, 'state': 'open', 'closes': list(closes), 'title': title,
-                            'head': {'sha': sha, 'repo': {'full_name': 'someone/fork' if fork else self.repository}}}
+                            'head': {'sha': sha, 'ref': head_ref,
+                                     'repo': {'full_name': 'someone/fork' if fork else self.repository}}}
 
     def push(self, number, sha):
         self.prs[number]['head']['sha'] = sha
@@ -48,6 +49,13 @@ class FakeGitHub:
         if method != 'GET':
             self.writes.append((method, path, token))
         parts = path[len(repo):].split('/')
+        if method == 'GET' and parts[0] == 'pulls' and len(parts) == 1:
+            head = query.get('head', '')
+            prefix = f'{self.repository}:'
+            ref = head[len(prefix):] if head.startswith(prefix) else head
+            matches = [pr for pr in self.prs.values() if pr['head'].get('ref') == ref]
+            return 200, [{'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': pr['title']}
+                         for pr in matches]
         if method == 'GET' and parts[0] == 'pulls' and len(parts) == 2:
             pr = self.prs[int(parts[1])]
             return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': pr['title']}

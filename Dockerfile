@@ -66,7 +66,7 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
 
 COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
-     scripts/claude-review scripts/uat-test scripts/superagent_checks.py /usr/local/bin/
+     scripts/claude-review scripts/uat-test scripts/superagent scripts/superagent_checks.py /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
@@ -75,6 +75,7 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-uat-recovery \
     /usr/local/bin/claude-review \
     /usr/local/bin/uat-test \
+    /usr/local/bin/superagent \
     /usr/local/bin/superagent_checks.py
 # Claude Code PR review: the read-only policy (managed settings take precedence over
 # user and repository settings) and the review prompt claude-review sends, and the

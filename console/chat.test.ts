@@ -1,7 +1,8 @@
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { describe, expect, it, vi } from 'vitest';
-import { createApp } from './server.ts';
+import { createApp } from './server.js';
+
 
 function mockModel(text = 'Hello from mock') {
   return new MockLanguageModelV4({

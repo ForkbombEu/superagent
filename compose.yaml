@@ -69,6 +69,10 @@ services:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SUPERAGENT_CONSOLE_MODEL: ${SUPERAGENT_CONSOLE_MODEL:-}
+      SUPERAGENT_CONSOLE_API_URL: ${SUPERAGENT_CONSOLE_API_URL:-http://dashboard:8080/orchestrator/api}
+      # Public Host for Caddy forward_auth when the compose hostname is refused.
+      SERVICE_FQDN_DASHBOARD: ${SERVICE_FQDN_DASHBOARD:-}
+
     expose:
       - "3000"
     healthcheck:

@@ -11,6 +11,9 @@ import { Hono } from 'hono';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createOrchestratorClient } from './lib/orchestrator.js';
+import { createConsoleTools } from './lib/tools.js';
+
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const webDist = existsSync(join(__dirname, 'web', 'dist'))
@@ -58,15 +61,19 @@ export function createApp(deps: ConsoleDeps = {}): Hono {
     }
 
     const body = await c.req.json<{ messages: UIMessage[] }>();
-    const messages = await convertToModelMessages(body.messages ?? []);
+    const cookie = c.req.header('cookie') ?? '';
+    const tools = createConsoleTools(createOrchestratorClient({ cookie }));
+    const messages = await convertToModelMessages(body.messages ?? [], { tools });
     const result = streamText({
       abortSignal: c.req.raw.signal,
       model: getModel(modelId),
       system: systemPrompt,
       messages,
+      tools,
     });
     return result.toUIMessageStreamResponse();
   });
+
 
   app.use(
     '/console/*',

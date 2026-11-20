@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createApp } from './server.ts';
+import { createApp } from './server.js';
+
 
 describe('console service', () => {
   it('answers health', async () => {

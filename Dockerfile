@@ -88,8 +88,7 @@ COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/supera
 COPY superagent.yaml superagent.schema.json /usr/local/share/superagent/
 COPY scripts/superagent_config.py /usr/local/share/superagent/superagent_config.py
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3-pip \
- && pip3 install --no-cache-dir pyyaml jsonschema \
+ && apt-get install -y --no-install-recommends python3-yaml python3-jsonschema \
  && python3 /usr/local/share/superagent/superagent_config.py render-profile \
       /usr/local/share/superagent/superagent.yaml \
       -o /usr/local/share/superagent/profile.patch.yml \

@@ -1,0 +1,116 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f4ef;
+  --ink: #1c1917;
+  --muted: #78716c;
+  --line: #e7e5e4;
+  --panel: #ffffff;
+  --accent: #0f766e;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.console-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.console-header {
+  padding: 1rem 1.25rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.console-header h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.console-header p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.console-main {
+  flex: 1;
+  min-height: 0;
+}
+
+.thread-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.thread-viewport {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem 1.25rem;
+}
+
+.thread-empty {
+  color: var(--muted);
+  margin: 2rem 0;
+}
+
+.message {
+  max-width: 48rem;
+  margin: 0 0 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.5rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.message.user {
+  background: #ecfdf5;
+  margin-left: auto;
+}
+
+.message.assistant {
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.composer-root {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem 1rem;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.composer-input {
+  flex: 1;
+  resize: none;
+  min-height: 2.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  font: inherit;
+}
+
+.composer-send {
+  border: 0;
+  border-radius: 0.4rem;
+  background: var(--accent);
+  color: white;
+  padding: 0 1rem;
+  font: inherit;
+  cursor: pointer;
+}

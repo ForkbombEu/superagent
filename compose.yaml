@@ -58,6 +58,22 @@ services:
     expose:
       - "3083"  # Docker-internal only; no host port mapping
 
+  # Opus console behind the dashboard cookie gate. Not required for the rest of
+  # the stack: dashboard must not depend_on it.
+  console:
+    build:
+      context: ./console
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/console/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
   dashboard:
     build:
       context: ./dashboard
@@ -80,6 +96,7 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
 
   # The UAT gate (uat/gate.py): takes run requests from superagent only, reads
   # what each run is bound to from GitHub (read access only), drives uat-runner

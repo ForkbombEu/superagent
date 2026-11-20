@@ -42,6 +42,18 @@ export type ConsoleDeps = {
   fetchImpl?: typeof fetch;
 };
 
+/** Blank/whitespace values (common when compose expands `${VAR:-}`) count as unset. */
+export function resolveConsoleModelId(
+  depsModelId?: string,
+  envModelId: string | undefined = process.env.SUPERAGENT_CONSOLE_MODEL,
+): string {
+  const fromDeps = depsModelId?.trim();
+  if (fromDeps) return fromDeps;
+  const fromEnv = envModelId?.trim();
+  if (fromEnv) return fromEnv;
+  return DEFAULT_CONSOLE_MODEL;
+}
+
 function loadSystemPrompt(): string {
   return readFileSync(join(promptsDir, 'system.md'), 'utf8');
 }
@@ -49,8 +61,7 @@ function loadSystemPrompt(): string {
 export function createApp(deps: ConsoleDeps = {}): Hono {
   const app = new Hono();
   const apiKey = deps.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '';
-  const modelId =
-    deps.modelId ?? process.env.SUPERAGENT_CONSOLE_MODEL ?? DEFAULT_CONSOLE_MODEL;
+  const modelId = resolveConsoleModelId(deps.modelId);
   const systemPrompt = deps.systemPrompt ?? loadSystemPrompt();
   const getModel = deps.getModel ?? ((id: string) => anthropic(id));
   const repoRoot = deps.repoRoot ?? defaultRepoRoot();

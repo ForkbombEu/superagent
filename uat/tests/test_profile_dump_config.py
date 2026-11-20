@@ -1,5 +1,6 @@
 """Docker: dump-config shows role presets and the worker allowlist."""
 import os
+import subprocess
 import unittest
 
 from uat.tests import docker_support as ds
@@ -12,12 +13,18 @@ class ProfileDumpConfigTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         ds.require_docker()
-        ds.docker(
-            'build', '-q', '-t', IMAGE,
-            '-f', os.path.join(ROOT, 'Dockerfile'),
-            ROOT,
-            timeout=1800,
-        )
+        try:
+            ds.docker(
+                'build', '-q', '-t', IMAGE,
+                '-f', os.path.join(ROOT, 'Dockerfile'),
+                ROOT,
+                timeout=1800,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise AssertionError(
+                f'docker build failed (exit {exc.returncode}):\n'
+                f'{exc.stderr or exc.stdout or exc}'
+            ) from exc
 
     def test_dump_config_contains_presets_and_allowlist(self):
         result = ds.docker(

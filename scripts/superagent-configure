@@ -16,6 +16,10 @@ converges these fields, overwriting panel edits of the same fields:
 
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
 the loop re-reads settings after each save until nothing differs.
+
+The primary Claude/DSH Workspace (the git checkout under $HOME/src/<repo>) is
+registered by the superagent-primary-workspace host plugin on DSH start, not here:
+that path needs ctx.workspaceRegistry, which the management API does not expose.
 """
 import json
 import os

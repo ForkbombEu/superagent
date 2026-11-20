@@ -1,0 +1,23 @@
+#!/bin/sh
+# DSH strips *_KEY/*_TOKEN from sandboxed setup/worker child shells.
+# This wrapper reloads Claude Code credentials from ephemeral container tmpfs
+# so plugin-spawned `claude` (and claude-review) can authenticate.
+set -eu
+file=/run/superagent-secrets/claude-review.json
+if [ ! -s "$file" ]; then
+  echo 'Claude Code credential unavailable: missing runtime secrets file' >&2
+  exit 1
+fi
+oauth=$(jq -r '.env.CLAUDE_CODE_OAUTH_TOKEN // empty' "$file")
+api_key=$(jq -r '.env.ANTHROPIC_API_KEY // empty' "$file")
+if [ -n "$oauth" ]; then
+  export CLAUDE_CODE_OAUTH_TOKEN="$oauth"
+fi
+if [ -n "$api_key" ]; then
+  export ANTHROPIC_API_KEY="$api_key"
+fi
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]; then
+  echo 'Claude Code credential unavailable: no token or API key in secrets file' >&2
+  exit 1
+fi
+exec /usr/local/bin/claude.real "$@"

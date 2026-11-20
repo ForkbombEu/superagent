@@ -539,7 +539,8 @@ unmergeable. Before enabling this version:
 
 Run the tests with `python3 -m unittest discover -s uat/tests -t .`; those
 that need Docker build the images and drive real DSH against a scripted model
-(`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them).
+(`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them). CI runs them, and builds
+the superagent image, on every pull request (`.github/workflows/test.yml`).
 
 ## 6. Operational notes and limitations
 

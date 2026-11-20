@@ -451,13 +451,13 @@ class HttpTest(Gate):
         self.verdicts[SHA2] = 'FAIL'
         result = self.client(REPOSITORY, '9', SHA2)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn('Send invalid POST', result.stdout)
-        self.assertIn('failing rounds used: 1 of 3', result.stdout)
+        self.assertIn('uat-test: rounds 1 of 3', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f'uat-test: FAIL for {SHA2}'))
         self.gh.push(9, SHA3)
         self.gh.add_issue(7, ISSUE.replace('UAT-2', 'UAT-1'))
         result = self.client(REPOSITORY, '9', SHA3)
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('duplicate scenario ids', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f'uat-test: BLOCKED for {SHA3}'))
         self.gh.push(9, SHA4)
         self.gh.add_issue(7, 'No tests here.')
         self.assertEqual(self.client(REPOSITORY, '9', SHA4).returncode, 0)
@@ -468,6 +468,19 @@ class HttpTest(Gate):
             if verdict in ('PASS', 'FAIL'):
                 self.assertIn('tester/attempt-1/trace.ndjson', comment['body'])
 
+    def test_full_report_is_not_on_stdout(self):
+        self.gh.push(9, SHA2)
+        self.verdicts[SHA2] = 'FAIL'
+        result = self.client(REPOSITORY, '9', SHA2)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn('Send invalid POST', result.stdout)
+        self.assertNotIn('# ', result.stdout)
+        detail = next(line for line in result.stdout.splitlines() if line.startswith('uat-test: detail '))
+        with open(detail.split(' ', 2)[2], encoding='utf-8') as file:
+            report = file.read()
+        self.assertIn('Send invalid POST', report)
+        self.assertIn('Send invalid POST', self.gh.comments[-1]['body'])
+
     def test_the_same_run_is_reported_once(self):
         self.client(REPOSITORY, '9', SHA1)
         self.assertEqual(self.client(REPOSITORY, '9', SHA1).returncode, 0)
@@ -475,7 +488,10 @@ class HttpTest(Gate):
 
     def test_verify_and_artifact(self):
         result = self.client(REPOSITORY, '9', SHA1)
-        run_id = next(line.split()[2] for line in result.stdout.splitlines() if line.startswith('UAT run: '))
+        detail = next(line for line in result.stdout.splitlines() if line.startswith('uat-test: detail '))
+        with open(detail.split(' ', 2)[2], encoding='utf-8') as file:
+            report = file.read()
+        run_id = next(line.split()[2] for line in report.splitlines() if line.startswith('UAT run: '))
         artifact = self.client('--artifact', run_id, 'app-logs/app.log')
         self.assertEqual((artifact.returncode, artifact.stdout), (0, 'POST /records -> 500\n'))
         self.assertEqual(self.client('--verify', REPOSITORY, '9', SHA1).returncode, 0)
@@ -572,6 +588,19 @@ class ConfigureTest(unittest.TestCase):
         self.assertEqual(self.delivery(), base)
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='false'), base)
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='true'), f'{base}\n\n{uat}')
+
+    def test_prompts_name_every_exit_code(self):
+        """Both Delivery procedures name the shared contract codes 0–4."""
+        for name in ('delivery.md', 'delivery-uat.md'):
+            with open(os.path.join(ROOT, 'prompts', name)) as file:
+                text = file.read()
+            for code in ('0', '1', '2', '3', '4'):
+                self.assertIn(f'`{code}`', text, f'{name} must name exit code {code}')
+            self.assertIn('Check exit codes', text)
+            self.assertRegex(
+                text, r'(?i)(read the detail file.*fail|on (a |exit `1`.*)?fail.*detail file|detail file.*only on a fail)',
+                f'{name} must say to read the detail file on a fail',
+            )
 
 
 if __name__ == '__main__':

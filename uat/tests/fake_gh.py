@@ -25,6 +25,9 @@ if args[:2] == ['pr', 'view']:
     fields = {'headRefOid': pr['head']['sha'], 'baseRefName': 'main', 'title': pr['title']}
     print(json.dumps({name: fields[name] for name in args[args.index('--json') + 1].split(',')}))
 elif args[:2] == ['pr', 'comment'] and '--body-file' in args:
+    if os.environ.get('FAKE_GH_FAIL_COMMENT'):
+        sys.stderr.write('gh: failed to post comment\n')
+        sys.exit(1)
     call('POST', f'repos/{repository}/issues/{args[2]}/comments', {'body': sys.stdin.read()})
 else:
     sys.exit(f'fake gh: unsupported {args}')

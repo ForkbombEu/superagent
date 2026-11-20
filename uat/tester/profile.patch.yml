@@ -23,7 +23,7 @@
 
 # Tests run against the application through the sandbox network only, and
 # every tool call stays in this session's trace, which the controller checks:
-# no web tool, subagents or workflows.
+# no web tool, subagents, agent teams or workflows.
 - id: tool-web
   disabled: true
 - id: tool-subagent
@@ -32,7 +32,7 @@
   disabled: true
 - id: tool-subagent-control
   disabled: true
-- id: tool-subagent-list-agents
+- id: tool-agent-team
   disabled: true
 - id: tool-workflow
   disabled: true

@@ -5,7 +5,7 @@
 # allowlisting egress proxy (proxy.py).
 FROM node:24-bookworm
 
-ARG DSH_VERSION=0.2.1-rc.3
+ARG DSH_VERSION=0.2.2-rc.5
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends chromium fonts-dejavu-core jq; \

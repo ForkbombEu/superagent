@@ -1,0 +1,53 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [attesta, main]
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 -m pip install pyyaml jsonschema
+      - run: python3 -m unittest discover -s uat/tests -t .
+        env:
+          SUPERAGENT_UAT_SKIP_DOCKER_TESTS: "1"
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 -m pip install pyyaml jsonschema
+      - run: python3 -m unittest discover -s uat/tests -t . -v
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # compose.yaml requires these (${VAR:?}) even to build; the image bakes in none of them.
+      DEEPSEEK_API_KEY: ci-dummy
+      GH_TOKEN: ci-dummy
+      GITHUB_REPOSITORY: ci-dummy/ci-dummy
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build superagent

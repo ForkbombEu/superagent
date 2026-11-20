@@ -353,7 +353,7 @@ by default (`SUPERAGENT_UAT_MAX_FAILED_ROUNDS`), separately from its three
 failed reviews, counted in the gate's database, so restarts of either service
 do not reset them; deleting the `uat_gate_state` volume does.
 
-The tester is DeepSeek Harness 0.2.1-rc.3 (`dsh --profile superagent-uat --json -`,
+The tester is DeepSeek Harness 0.2.2-rc.5 (`dsh --profile superagent-uat --json -`,
 prompt on stdin, [profile](uat/tester/profile.patch.yml) seeded from the
 headless template and checked at image build) in a disposable container, a
 fresh session per attempt. Its [prompt](prompts/uat-tester.md) treats the
@@ -539,7 +539,8 @@ unmergeable. Before enabling this version:
 
 Run the tests with `python3 -m unittest discover -s uat/tests -t .`; those
 that need Docker build the images and drive real DSH against a scripted model
-(`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them).
+(`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them). CI runs them, and builds
+the superagent image, on every pull request (`.github/workflows/test.yml`).
 
 ## 6. Operational notes and limitations
 

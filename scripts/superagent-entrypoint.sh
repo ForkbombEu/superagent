@@ -40,9 +40,9 @@ install -m 0600 /dev/null /run/superagent-secrets/github-token
 printf '%s' "$GH_TOKEN" > /run/superagent-secrets/github-token
 unset GH_TOKEN GITHUB_TOKEN
 
-# claude-review reads the Claude Code credential, model and effort from here.
-# DSH strips *_KEY/*_TOKEN from worker shells; keep CLAUDE_CODE_OAUTH_TOKEN so
-# dsh-claude (plugin-spawned claude) can authenticate — OAuth must remain for dsh-claude.
+# claude-review and /usr/local/bin/claude-agent (shadowing `claude`) read the
+# Claude Code credential, model and effort from here. DSH strips *_KEY/*_TOKEN
+# from child shells; keeping CLAUDE_CODE_OAUTH_TOKEN on dsh itself is not enough.
 install -m 0600 /dev/null /run/superagent-secrets/claude-review.json
 python3 > /run/superagent-secrets/claude-review.json <<'PY'
 import json, os

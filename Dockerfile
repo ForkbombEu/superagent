@@ -67,10 +67,15 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
 COPY dsh/console-plugin /opt/superagent-console
 RUN chown -R agent:agent /opt/superagent-console
 
-COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
+COPY scripts/gh-agent scripts/claude-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/gh-agent \
+# DSH strips *_KEY/*_TOKEN from child shells; shadow npm's `claude` so every
+# invocation (dsh-claude, claude-review) reloads credentials from tmpfs.
+RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
+ && ln -s /usr/local/bin/claude-agent /usr/local/bin/claude \
+ && chmod 0755 /usr/local/bin/gh-agent \
+    /usr/local/bin/claude-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \

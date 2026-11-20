@@ -21,9 +21,11 @@ names that issue: the gate pins it to the PR and requires the PR to close
 it, so editing the PR's `Closes #<n>` line cannot swap its UAT for another.
 
 The report (verdict, failing scenarios with expected, observed and
-reproduction, the run id for --artifact) is printed, kept under
+reproduction, the run id for --artifact) is kept under
 ~/.local/state/uat-test and posted on the PR as a comment, as the record of
-each run; the same run is posted once.
+each run; the same run is posted once. Stdout is the compact check result
+from superagent_checks (detail path, rounds, last line
+`uat-test: <VERDICT> for <sha>`).
 
 Exit status: 0 PASS, or no UAT required, for <head sha> (for --verify: the
 result still holds); 1 FAIL (--verify: it does not); 2 BLOCKED (including no
@@ -39,19 +41,17 @@ import time
 import urllib.error
 import urllib.request
 
+import superagent_checks as checks
+
 # Written by superagent-entrypoint.sh: the gate URL and request token.
 CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
-HISTORY = os.path.expanduser('~/.local/state/uat-test')
 GH = os.environ.get('UAT_TEST_GH', 'gh-agent')
-DISCLOSURE = 'This is by an automated agent, not a human.'
 POLL_SECONDS = float(os.environ.get('UAT_TEST_POLL_SECONDS', '15'))
 TIMEOUT_SECONDS = float(os.environ.get('UAT_TEST_TIMEOUT_SECONDS', str(150 * 60)))
 # How long the gate may stay unreachable before giving up (restarts take well under this).
 OUTAGE_SECONDS = float(os.environ.get('UAT_TEST_OUTAGE_SECONDS', '300'))
 MAX_STALE_REQUESTS = 2
-# GitHub rejects comments over 65536 characters.
-MAX_COMMENT = 60000
-EXIT = {'PASS': 0, 'NOT_REQUIRED': 0, 'FAIL': 1, 'BLOCKED': 2}
+GATE_VERDICTS = {'PASS', 'NOT_REQUIRED', 'FAIL', 'BLOCKED'}
 
 
 def fail(message, status=3):
@@ -142,31 +142,24 @@ def wait(repository, number, sha):
 def report(repository, number, sha, run):
     body = (f'# {run["title"]}\n\n{run["summary"] or ""}\n\n{run["text"] or ""}\n\n'
             f'UAT run: {run["run_id"]} (files: uat-test --artifact {run["run_id"]} <path>)\n').replace('\n\n\n', '\n\n')
-    directory = os.path.join(HISTORY, repository, f'pr-{number}')
+    directory = checks.history_dir('uat-test', repository, number)
     os.makedirs(directory, exist_ok=True)
     saved = os.path.join(directory, f'{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}-{sha[:12]}.md')
     with open(saved, 'w', encoding='utf-8') as file:
         file.write(body)
     # The PR comment is the record of the run, as claude-review's is of a review; one per run.
-    posted_marker = os.path.join(directory, f'posted-{run["run_id"]}')
-    posted = True
-    if not os.path.exists(posted_marker):
-        details = f'{run["summary"] or ""}\n\n{run["text"] or ""}'.strip()
-        if len(details) > MAX_COMMENT:
-            details = details[:MAX_COMMENT] + '\n\n(Truncated to fit a GitHub comment.)'
-        comment = (f'{DISCLOSURE}\n\n**DeepSeek UAT** of {sha}: **{run["verdict"]}** ({run["title"]})\n\n{details}\n\n'
-                   f'UAT run `{run["run_id"]}`.\n')
-        result = gh('pr', 'comment', number, '--repo', repository, '--body-file', '-', stdin=comment)
-        posted = result.returncode == 0
-        if posted:
-            open(posted_marker, 'w').close()
-    print(body)
-    print(f'uat-test: the whole report is in {saved}')
-    print(f'uat-test: failing rounds used: {run["failed_rounds"]} of {run.get("max_failed_rounds", "?")}')
-    print(f'uat-test: {run["verdict"]} for {sha}')
+    details = f'{run["summary"] or ""}\n\n{run["text"] or ""}'.strip()
+    comment = (f'**DeepSeek UAT** of {sha}: **{run["verdict"]}** ({run["title"]})\n\n{details}\n\n'
+               f'UAT run `{run["run_id"]}`.\n')
+    posted = checks.pr_comment(repository, number, comment, directory=directory, marker=run['run_id'], gh=gh)
+    code = checks.print_result(checks.Result(
+        check='uat-test', verdict=run['verdict'], sha=sha,
+        rounds_used=run['failed_rounds'], rounds_allowed=run.get('max_failed_rounds'),
+        next_step=None, detail_file=saved,
+    ))
     if not posted:
-        fail(f'the report could not be posted on PR #{number}: {result.stderr.strip()}')
-    sys.exit(EXIT[run['verdict']])
+        fail(f'the report could not be posted on PR #{number}')
+    sys.exit(code)
 
 
 def main(args):
@@ -194,7 +187,7 @@ def main(args):
         print(f'uat-test: {"current" if answer["current"] else "NOT current"} for {sha}: {answer["reason"]}')
         sys.exit(0 if answer['current'] else 1)
     run = wait(repository, number, sha)
-    if run['verdict'] not in EXIT:
+    if run['verdict'] not in GATE_VERDICTS:
         fail(f'UAT run {run["run_id"]} ended with {run["verdict"]!r}')
     report(repository, number, sha, run)
 

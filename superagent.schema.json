@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ForkbombEu/superagent/superagent.schema.json",
+  "title": "Superagent deployment configuration (superagent.yaml)",
+  "description": "Deployment-owned: tiers and roles for the image or Coolify deployment. Never read from a pull request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tiers", "roles"],
+  "properties": {
+    "version": {"const": 1},
+    "tiers": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/tierName"},
+      "additionalProperties": {"$ref": "#/$defs/tier"}
+    },
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/roleName"},
+      "additionalProperties": {"$ref": "#/$defs/role"}
+    }
+  },
+  "$defs": {
+    "tierName": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "roleName": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "instructionsPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9._/-]+\\.(md|txt)$"
+    },
+    "claudeModel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "reasoningEffort": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "xhigh", "max"]
+    },
+    "dshModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 64},
+        "model": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reasoningEffort": {"$ref": "#/$defs/reasoningEffort"}
+      }
+    },
+    "tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "claude": {"$ref": "#/$defs/claudeModel"},
+        "dsh": {"$ref": "#/$defs/dshModel"}
+      }
+    },
+    "runtime": {
+      "type": "string",
+      "enum": ["dsh-worker", "claude-code", "dsh-headless", "local"]
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "when"],
+      "properties": {
+        "tier": {"$ref": "#/$defs/tierName"},
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["diff_lines_below"],
+          "properties": {
+            "diff_lines_below": {"type": "integer", "minimum": 1, "maximum": 1000000}
+          }
+        }
+      }
+    },
+    "subagent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "instructions"],
+      "properties": {
+        "tier": {"$ref": "#/$defs/tierName"},
+        "instructions": {"$ref": "#/$defs/instructionsPath"}
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "tier"],
+      "properties": {
+        "runtime": {"$ref": "#/$defs/runtime"},
+        "tier": {"$ref": "#/$defs/tierName"},
+        "instructions": {"$ref": "#/$defs/instructionsPath"},
+        "route": {"$ref": "#/$defs/route"},
+        "subagents": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/roleName"},
+          "additionalProperties": {"$ref": "#/$defs/subagent"}
+        },
+        "sources": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 200},
+          "maxItems": 32
+        }
+      }
+    }
+  }
+}

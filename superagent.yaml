@@ -1,0 +1,57 @@
+# Deployment-owned Superagent configuration (F6).
+# Ships in the image / Coolify deployment; never read from a pull request.
+# Environment variables still override these values (env wins).
+version: 1
+
+tiers:
+  # Claude aliases for the reviewer; DSH models for workers and UAT.
+  high:
+    claude: opus
+  mid:
+    claude: sonnet
+    dsh:
+      provider: deepseek-official
+      model: deepseek-flash
+  low:
+    dsh:
+      provider: deepseek-official
+      model: deepseek-flash
+      reasoningEffort: low
+
+roles:
+  implementer:
+    runtime: dsh-worker
+    tier: mid
+    # Today's Delivery requirements (no separate implementer persona file yet).
+    instructions: prompts/delivery.md
+    subagents:
+      frontend:
+        tier: mid
+        instructions: roles/frontend.md
+      devops:
+        tier: mid
+        instructions: roles/devops.md
+      explorer:
+        tier: low
+        instructions: roles/explorer.md
+
+  reviewer:
+    runtime: claude-code
+    tier: high
+    route:
+      tier: mid
+      when:
+        diff_lines_below: 200
+    instructions: claude-code/review-prompt.md
+
+  uat-tester:
+    runtime: dsh-headless
+    tier: mid
+    instructions: prompts/uat-tester.md
+
+  architect:
+    runtime: local
+    tier: high
+    sources:
+      - codebase-memory-mcp
+      - docs/specification.md

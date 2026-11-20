@@ -32,13 +32,25 @@ class FakeGitHub:
     def add_issue(self, number, body):
         self.issues[number] = {'number': number, 'body': body, 'updated_at': f'2026-11-09T10:00:{number % 60:02d}Z'}
 
-    def add_pr(self, number, sha, closes, fork=False, title='feat: x', head_ref='agent/ticket'):
+    def add_pr(self, number, sha, closes, fork=False, title='feat: x', head_ref='agent/ticket', draft=False):
         self.prs[number] = {'number': number, 'state': 'open', 'closes': list(closes), 'title': title,
+                            'draft': draft, 'checks': [], 'reviews': [],
                             'head': {'sha': sha, 'ref': head_ref,
                                      'repo': {'full_name': 'someone/fork' if fork else self.repository}}}
 
     def push(self, number, sha):
         self.prs[number]['head']['sha'] = sha
+
+    def set_draft(self, number, draft=True):
+        self.prs[number]['draft'] = draft
+
+    def set_checks(self, number, checks):
+        """checks: list of {name, state, bucket?, required?} — state pass|fail|pending|skipping."""
+        self.prs[number]['checks'] = list(checks)
+
+    def set_reviews(self, number, reviews):
+        """reviews: list of {state, author?} — state APPROVED|CHANGES_REQUESTED|COMMENTED|DISMISSED|PENDING."""
+        self.prs[number]['reviews'] = list(reviews)
 
     def answer(self, method, path, query, token, body):
         repo = f'repos/{self.repository}/'
@@ -58,7 +70,9 @@ class FakeGitHub:
                          for pr in matches]
         if method == 'GET' and parts[0] == 'pulls' and len(parts) == 2:
             pr = self.prs[int(parts[1])]
-            return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': pr['title']}
+            return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': pr['title'],
+                         'draft': pr.get('draft', False), 'checks': pr.get('checks', []),
+                         'reviews': pr.get('reviews', [])}
         if method == 'GET' and parts[0] == 'issues':
             number = int(parts[1])
             if number in self.prs:  # GitHub's issues API answers pull requests too, marked as such.
@@ -70,6 +84,10 @@ class FakeGitHub:
         if method == 'GET' and parts[0] == 'contents':
             key = ('/'.join(parts[1:]), query.get('ref'))
             return (200, self.contents[key]) if key in self.contents else (404, {'message': 'Not Found'})
+        if method == 'POST' and parts[0] == 'pulls' and len(parts) == 3 and parts[2] == 'ready':
+            pr = self.prs[int(parts[1])]
+            pr['draft'] = False
+            return 200, {'number': pr['number'], 'draft': False}
         return 404, {'message': f'no fake for {method} {path}'}
 
     def graphql(self, body):

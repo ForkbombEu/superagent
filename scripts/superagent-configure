@@ -10,6 +10,10 @@ converges these fields, overwriting panel edits of the same fields:
 - Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
   optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
 - Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
+- Subagent model routes: validates $SUPERAGENT_TIER_LOW_* / $SUPERAGENT_TIER_MID_*
+  (provider + model, optional reasoning effort). Host allowedModels are applied by
+  the profile patch on subagent-model-selection-settings (see
+  docs/adr/0001-worker-presets.md); this script only fails fast on a half-set tier.
 - Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, run
   superagent check then squash-merge, followed by delivery-uat.md, the user
   acceptance tests procedure, when $SUPERAGENT_UAT_ENABLED is true
@@ -65,6 +69,32 @@ def allowed_users():
     return users or None
 
 
+def tier_routes():
+    """Host `allowedModels` routes from SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_*.
+
+    Each tier needs both PROVIDER and MODEL when any of its fields is set. Optional
+    REASONING_EFFORT is accepted for naming parity with SUPERAGENT_EXECUTOR_* but is
+    not part of the Host allowlist (provider + model only). Duplicate provider/model
+    pairs collapse to one route — the Host setting rejects repeats.
+    """
+    routes, seen = [], set()
+    for tier in ('LOW', 'MID'):
+        prefix = f'SUPERAGENT_TIER_{tier}_'
+        provider = os.environ.get(prefix + 'PROVIDER', '').strip()
+        model = os.environ.get(prefix + 'MODEL', '').strip()
+        effort = os.environ.get(prefix + 'REASONING_EFFORT', '').strip()
+        if not (provider or model or effort):
+            continue
+        if not (provider and model):
+            sys.exit(f'superagent-configure: set both {prefix}PROVIDER and {prefix}MODEL')
+        key = f'{provider}\0{model}'
+        if key in seen:
+            continue
+        seen.add(key)
+        routes.append({'provider': provider, 'model': model})
+    return routes
+
+
 def executor_settings():
     """Executor fields the environment sets: `model` and `maxWorkers`, each only when configured."""
     provider = os.environ.get('SUPERAGENT_EXECUTOR_PROVIDER', '').strip()
@@ -105,6 +135,8 @@ def changes(view, prompts, users, executor_env, delivery):
 
 def main():
     users, executor_env = allowed_users(), executor_settings()
+    # Validate tier env early; Host routes themselves come from the profile patch.
+    tier_routes()
     delivery = ''
     uat = os.environ.get('SUPERAGENT_UAT_ENABLED') == 'true'
     for path in (DELIVERY, *([DELIVERY_UAT] if uat else [])):

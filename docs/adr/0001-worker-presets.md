@@ -111,10 +111,13 @@ allowlist; empty/malformed/repeated routes reject with
 `INVALID_MODEL_SELECTION_SETTINGS`; a route outside the list is
 `MODEL_ROUTE_NOT_ALLOWED`.
 
-F5.3 should enable this Host setting (profile patch on
-`subagent-model-selection-settings`) and populate `allowedModels` from
-`SUPERAGENT_TIER_LOW_*` / `SUPERAGENT_TIER_MID_*` (or equivalent). Preset
-allowlists and Host routes are separate gates.
+F5.3 enables this Host setting via the profile patch on
+`subagent-model-selection-settings`, with `enabled` and `allowedModels` read
+from `SUPERAGENT_TIER_LOW_*` / `SUPERAGENT_TIER_MID_*` through `!!js` at DSH
+load (same env pattern as the UAT tester profile). `superagent-configure`
+validates those variables on start but does not write the Host setting — the
+orchestrator management API has no block for it. Preset allowlists and Host
+routes are separate gates.
 
 ## Fallback
 

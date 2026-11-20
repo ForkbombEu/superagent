@@ -59,12 +59,16 @@ services:
       - "3083"  # Docker-internal only; no host port mapping
 
   # Opus console behind the dashboard cookie gate. Not required for the rest of
-  # the stack: dashboard must not depend_on it.
+  # the stack: dashboard must not depend_on it. Needs ANTHROPIC_API_KEY (not the
+  # Claude Code OAuth token alone); without it the chat route answers 503.
   console:
     build:
       context: ./console
       dockerfile: Dockerfile
     restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SUPERAGENT_CONSOLE_MODEL: ${SUPERAGENT_CONSOLE_MODEL:-}
     expose:
       - "3000"
     healthcheck:
@@ -73,6 +77,7 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+
 
   dashboard:
     build:

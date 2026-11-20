@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { app } from './server.ts';
+import { createApp } from './server.ts';
 
 describe('console service', () => {
   it('answers health', async () => {
-    const res = await app.request('/console/api/health');
+    const res = await createApp({ apiKey: '' }).request('/console/api/health');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it('reports when chat is not configured', async () => {
+    const res = await createApp({ apiKey: '' }).request('/console/api/config');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ configured: false });
   });
 });

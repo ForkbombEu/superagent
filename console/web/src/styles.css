@@ -46,6 +46,12 @@ body,
   font-size: 0.9rem;
 }
 
+.console-status {
+  margin: 2rem 1.25rem;
+  color: var(--muted);
+}
+
+
 .console-main {
   flex: 1;
   min-height: 0;

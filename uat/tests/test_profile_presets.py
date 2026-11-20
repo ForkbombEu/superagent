@@ -65,6 +65,23 @@ class ProfilePresetsTest(unittest.TestCase):
             with open(path, encoding='utf-8') as persona:
                 self.assertTrue(persona.read().strip(), f'empty persona {path}')
 
+    def test_host_model_selection_reads_tier_env(self):
+        """Profile enables subagent-model-selection-settings from SUPERAGENT_TIER_*."""
+        entries = load_profile()
+        row = next((e for e in entries if e.get('id') == 'subagent-model-selection-settings'), None)
+        self.assertIsNotNone(row, 'missing subagent-model-selection-settings override')
+        config = row.get('config') or {}
+        self.assertIn('enabled', config)
+        self.assertIn('allowedModels', config)
+        enabled = config['enabled']
+        models = config['allowedModels']
+        self.assertIsInstance(enabled, str)
+        self.assertIsInstance(models, str)
+        self.assertIn('SUPERAGENT_TIER_LOW', enabled)
+        self.assertIn('SUPERAGENT_TIER_MID', enabled)
+        self.assertIn('SUPERAGENT_TIER_LOW', models)
+        self.assertIn('SUPERAGENT_TIER_MID', models)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -64,6 +64,8 @@ Configure Environment Variables:
 | `SUPERAGENT_EXECUTOR_MODEL`                      | Optional, required with the provider. Executor model id, e.g. `deepseek-flash`                                                                                                                                                                                                                                                                                                             |
 | `SUPERAGENT_EXECUTOR_REASONING_EFFORT`           | Optional. Executor reasoning effort; empty uses the model default                                                                                                                                                                                                                                                                                                                          |
 | `SUPERAGENT_MAX_WORKERS`                         | Optional. Tickets worked on at the same time, 1–16 (panel default 3)                                                                                                                                                                                                                                                                                                                       |
+| `SUPERAGENT_TIER_LOW_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Low-tier subagent route (e.g. `explorer`). Provider and model together; effort optional. Empty leaves Host model selection off                                                                                                                                                                                                                                      |
+| `SUPERAGENT_TIER_MID_PROVIDER` / `_MODEL` / `_REASONING_EFFORT` | Optional. Mid-tier subagent route (e.g. `frontend`, `devops`). Same shape as the low tier                                                                                                                                                                                                                                                                                     |
 
 Provider and model ids are the ones the panel's model fields accept; the
 panel shows the DSH default as `provider / model`.
@@ -110,6 +112,18 @@ settings through the management API, so a new deployment starts configured:
 | Execution > Concurrent Tickets                                  | `$SUPERAGENT_MAX_WORKERS`, when set                                                                                                                                                                      |
 | Execution > Prepare command                                     | `/usr/local/bin/prepare-worktree.sh`                                                                                                                                                                     |
 | Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): run `superagent check`, follow `next:`, then `superagent merge` and follow `next:`; followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
+
+Worker subagent model routes are **not** written through this management API.
+They come from the profile patch on Host `subagent-model-selection-settings`
+([ADR](docs/adr/0001-worker-presets.md)): when `$SUPERAGENT_TIER_LOW_*` /
+`$SUPERAGENT_TIER_MID_*` are set, DSH enables the setting and fills
+`allowedModels` at load. `superagent-configure` validates the same variables
+(half-set tier → exit) so a bad Coolify config fails at start. Delivery maps
+map/search → `explorer` (low tier), UI → `frontend` (mid), build/deploy/CI →
+`devops` (mid). Unlisted presets stay rejected by the F5.2 allowlist. To verify
+on a deployment: set both tiers, open a worker session, call
+`list_subagent_models`, spawn `explorer` with the low-tier route, and confirm an
+unknown preset is refused.
 
 These values win over panel edits: change them in Coolify and redeploy. An
 unset optional variable leaves its setting to the panel. The Ticket directory

@@ -6,6 +6,8 @@ Refresh the comparison when later UI changes make it stale.
 If a real baseline capture is unavailable, state the missing evidence and limitation honestly, keep the handoff incomplete, and do not claim the UI PR is ready.
 Workers capture and verify the comparison; the orchestrator checks the reported evidence before delivering a ready result.
 
+When a subtask fits a role preset, spawn it with `subagent` (agentPreset) and pick an authorized model from `list_subagent_models`: map, search or locate work → `explorer` on the low-tier (cheaper) route; UI, CSS or frontend components → `frontend` on the mid-tier route; build, deploy, CI, Docker or infra → `devops` on the mid-tier route. Prefer the matching preset over doing that work in the worker session; an unlisted preset is rejected by the allowlist.
+
 Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.
 
 Write every commit message and every PR title as a Conventional Commit (https://www.conventionalcommits.org/en/v1.0.0/): `<type>(<optional scope>): <description>`, with type one of feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert, the description in the imperative mood, lowercase and without a final period, `!` after the type or scope and a `BREAKING CHANGE:` footer for a breaking change, and a body only to explain why.

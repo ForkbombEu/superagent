@@ -49,3 +49,8 @@ class ProfileDumpConfigTest(unittest.TestCase):
                 dump,
                 f'persona path missing for {preset}',
             )
+
+        # Host model-selection settings: !!js unevaluated, env names must appear.
+        self.assertIn('subagent-model-selection-settings', dump)
+        self.assertIn('SUPERAGENT_TIER_LOW_PROVIDER', dump)
+        self.assertIn('SUPERAGENT_TIER_MID_MODEL', dump)

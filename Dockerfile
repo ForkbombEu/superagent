@@ -83,24 +83,20 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
 # SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
+COPY dsh/profile.patch.yml /usr/local/share/superagent/profile.patch.yml
+COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/superagent/roles/
 
 USER agent
 
-# Seed the DSH profile at image build time. On first use, Docker copies the
-# image's /home/agent contents into an empty named volume at that mountpoint.
+# Seed the DSH profile at image build time from the reviewable patch in-repo.
+# On first use, Docker copies the image's /home/agent contents into an empty
+# named volume at that mountpoint.
 RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
     mkdir -p "$DSH_HOME/state/superagent"; \
-    printf '%s\n' \
-      '- id: webserver' \
-      '  config:' \
-      '    host: 127.0.0.1' \
-      '    port: 3082' \
-      '- id: dsh-superagent' \
-      '  config:' \
-      '    stateDir: /home/agent/.dsh/state/superagent' \
-      > "$DSH_HOME/profiles/superagent/cordis.patch.yml"
+    cp /usr/local/share/superagent/profile.patch.yml \
+      "$DSH_HOME/profiles/superagent/cordis.patch.yml"
 
 # The main DSH webserver is loopback-only. The entrypoint uses socat
 # to expose port 3083 to the INTERNAL dashboard sidecar; no host port is published.

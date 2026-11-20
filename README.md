@@ -109,7 +109,7 @@ settings through the management API, so a new deployment starts configured:
 | Execution > Executor model                                      | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set                                                                                         |
 | Execution > Concurrent Tickets                                  | `$SUPERAGENT_MAX_WORKERS`, when set                                                                                                                                                                      |
 | Execution > Prepare command                                     | `/usr/local/bin/prepare-worktree.sh`                                                                                                                                                                     |
-| Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): run `superagent check`, follow `next:`, then the merge procedure below; followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
+| Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): run `superagent check`, follow `next:`, then `superagent merge` and follow `next:`; followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
 
 These values win over panel edits: change them in Coolify and redeploy. An
 unset optional variable leaves its setting to the panel. The Ticket directory
@@ -129,7 +129,9 @@ DeepSeek worker runs [`superagent check`](scripts/superagent) in the ticket
 directory, then follows [`prompts/delivery.md`](prompts/delivery.md). The
 command finds the repository, PR and head itself, runs the next missing check
 for that head (`uat-test` when UAT is on and has no result, else
-`claude-review`), and prints one compact result with `next:`:
+`claude-review`), and prints one compact result with `next:`. After a pass,
+`superagent merge` re-checks every merge condition and squash-merges with
+`--match-head-commit`, or names the unmet step in `next:`:
 
 ```mermaid
 flowchart TD
@@ -141,11 +143,12 @@ flowchart TD
   B2 -->|next: run superagent check| B
   B2 -->|next: retry| D[One retry, then report blocked]
   B2 -->|next: stop| X[Report blocked]
-  B2 -->|next: done| E[Mark draft ready, report ready]
-  E --> F{head and title still reviewed, required checks passed, no changes requested?}
-  F -->|checks pending| F
-  F -->|check failed or head changed| C
-  F -->|yes| G["gh pr merge --squash --match-head-commit sha --subject 'title (#n)'"]
+  B2 -->|next: done| E["superagent merge"]
+  E -->|next: mark ready| R[gh pr ready, report ready]
+  E -->|next: retry| F[Wait for checks]
+  F --> E
+  E -->|unmet / blocked| C
+  E -->|next: done| G[Squash-merged with match-head-commit]
 ```
 
 `claude-review` remains the Claude Code entry point inside `superagent check`.
@@ -250,13 +253,14 @@ dsh-superagent limits its workers to a fixed list of tools (`WORK_TOOLS` in its
   versions stay in the `superagent_home` volume. Tool versions apply in any
   directory; mise runs a `mise.toml`'s `[env]`, tasks and hooks only in the
   Ticket directories, the repository checkout and the review checkouts.
-- These are prompt instructions to the DeepSeek worker, not a guarantee
-  enforced by code: the worker could merge without a review. Branch protection
-  is the enforced part (CI, no force pushes to the base branch). The Claude Code
-  review and the [user acceptance tests](#5-user-acceptance-tests) are
-  independently executed, but their verdicts are enforced by the Delivery
-  requirements: their PR comments are written with the agent's own token, so
-  they are a record, not a security gate.
+- Merge eligibility is checked in [`superagent merge`](scripts/superagent)
+  (passing review for the current head and title, `uat-test --verify` when UAT
+  is on, required checks, no changes requested) before `gh pr merge
+  --match-head-commit`. Branch protection still enforces CI and no force pushes
+  to the base branch. The Claude Code review and the
+  [user acceptance tests](#5-user-acceptance-tests) are independently executed;
+  their PR comments are written with the agent's own token, so they are a
+  record, not a security gate against a worker that bypasses `superagent merge`.
 
 ### Target repository setup
 
@@ -307,7 +311,7 @@ flowchart TD
   K -->|PASS or NOT_REQUIRED| C[claude-review on the same sha via superagent check]
   N --> C
   C -->|FAIL| X
-  C -->|PASS, next done| M[uat-test --verify, then merge: CI + review + squash merge]
+  C -->|PASS, next done| M["superagent merge (verify + squash)"]
 ```
 
 | Function                                                                           | Owner                                                                                        |
@@ -331,11 +335,11 @@ could not be posted). It accepts the gate's record only for that exact SHA, PR
 and repository, and a pass only while it still holds for the PR's current head
 and its issue's current spec. It posts the report on the PR, once per run, as
 `claude-review` posts its review. Any new commit is a new head: both earlier
-results stop counting, and the head gets UAT and then a review again. Before
-merging, the worker runs `uat-test --verify` on the head it merges, then the
-existing merge procedure applies unchanged: a passing review of that head and
-title, every required CI check passed, no review requesting changes, and
-`gh pr merge --squash --match-head-commit`.
+results stop counting, and the head gets UAT and then a review again. After a
+pass, the worker runs [`superagent merge`](scripts/superagent), which
+re-checks every merge condition (including `uat-test --verify` when UAT is on)
+and squash-merges with `--match-head-commit`, or names the unmet step in
+`next:`.
 
 ### Services and trust boundaries
 

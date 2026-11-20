@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""superagent check: the next step for a pull request head.
+"""superagent check/merge: next check for a PR head, or merge readiness.
 
-Resolves repository, PR and head, then either prints the plan (`--dry-run`) or
-runs the next missing check under a per-PR lock: `uat-test` when UAT is on and
-has no result for the head, else `claude-review` when it has none. Aggregates
-into one compact result with `next:`. Three failed reviews on the PR → exit 2.
+`check` resolves repository, PR and head, then either prints the plan
+(`--dry-run`) or runs the next missing check under a per-PR lock.
+`merge` re-reads head and title, checks every Delivery merge condition, then
+squash-merges with `--match-head-commit` (or `--dry-run` reports only).
 """
 import fcntl
 import json
@@ -284,12 +284,134 @@ def run_check():
         lock.close()
 
 
+def find_passing_review(directory, sha, title):
+    if not os.path.isdir(directory):
+        return None
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith('.json'):
+            continue
+        path = os.path.join(directory, name)
+        with open(path, encoding='utf-8') as file:
+            data = json.load(file)
+        if data.get('sha') == sha and data.get('title') == title and data.get('verdict') == 'PASS':
+            return data
+    return None
+
+
+def pr_snapshot(repository, number):
+    view = checks.gh(
+        'pr', 'view', str(number), '--repo', repository,
+        '--json', 'headRefOid,title,isDraft,reviews',
+    )
+    if view.returncode:
+        fail(f'{checks.GH} pr view failed: {view.stderr.strip()}')
+    return json.loads(view.stdout)
+
+
+def run_uat_verify(repository, number, sha):
+    result = subprocess.run(
+        ['uat-test', '--verify', repository, str(number), sha],
+        capture_output=True, text=True,
+    )
+    if result.stdout:
+        sys.stderr.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def checks_status(repository, number):
+    """Return 'pass', 'pending', or 'fail' for the PR's required (or all) checks."""
+    required = checks.gh('pr', 'checks', str(number), '--required', '--repo', repository)
+    if required.returncode == 8:
+        return 'pending'
+    if required.returncode not in (0, 1):
+        fail(f'{checks.GH} pr checks --required failed: {required.stderr.strip()}', checks.Exit.RETRY)
+    no_required = required.returncode == 0 and 'no required checks' in (required.stderr or '').lower()
+    if required.returncode == 0 and not no_required:
+        return 'pass'
+    if required.returncode == 1 and not no_required:
+        return 'fail'
+    all_checks = checks.gh('pr', 'checks', str(number), '--repo', repository)
+    if all_checks.returncode == 8:
+        return 'pending'
+    if all_checks.returncode == 0:
+        return 'pass'
+    if all_checks.returncode == 1:
+        return 'fail'
+    fail(f'{checks.GH} pr checks failed: {all_checks.stderr.strip()}', checks.Exit.RETRY)
+
+
+def changes_requested(reviews):
+    return any((review or {}).get('state') == 'CHANGES_REQUESTED' for review in (reviews or []))
+
+
+def unmet(name, sha):
+    finish('PRECONDITION', sha, next_step=name)
+
+
+def evaluate_merge():
+    """Check every Delivery merge condition; exit on unmet. Return repo, number, sha, title."""
+    repository, number, sha = resolve()
+    pr = pr_snapshot(repository, number)
+    if pr['headRefOid'] != sha:
+        fail(f'the PR head is {pr["headRefOid"]}, not {sha}: run against the current head')
+    title = pr['title']
+    if pr.get('isDraft'):
+        unmet('mark ready', sha)
+
+    review_dir = checks.history_dir('claude-review', repository, number)
+    if not find_passing_review(review_dir, sha, title):
+        unmet('passing review', sha)
+
+    if uat_on():
+        code = run_uat_verify(repository, number, sha)
+        if code != 0:
+            unmet('uat-test --verify', sha)
+
+    status = checks_status(repository, number)
+    if status == 'pending':
+        finish('RETRY', sha, next_step='retry')
+    if status == 'fail':
+        unmet('checks', sha)
+
+    if changes_requested(pr.get('reviews')):
+        unmet('changes requested', sha)
+
+    return repository, number, sha, title
+
+
+def dry_run_merge():
+    _repository, _number, sha, _title = evaluate_merge()
+    finish('PASS', sha, next_step='merge')
+
+
+def run_merge():
+    repository, number, sha, title = evaluate_merge()
+    subject = f'{title} (#{number})'
+    result = checks.gh(
+        'pr', 'merge', str(number),
+        '--squash',
+        '--match-head-commit', sha,
+        '--subject', subject,
+        '--repo', repository,
+    )
+    if result.returncode:
+        message = (result.stderr or result.stdout or 'merge refused').strip()
+        fail(message, checks.Exit.BLOCKED)
+    finish('PASS', sha, next_step='done')
+
+
 def main(args):
     if args == ['check', '--dry-run']:
         dry_run()
     if args == ['check']:
         run_check()
-    fail(f'usage: {CHECK} check [--dry-run]', checks.Exit.PRECONDITION)
+    if args == ['merge', '--dry-run']:
+        dry_run_merge()
+    if args == ['merge']:
+        run_merge()
+    fail(f'usage: {CHECK} check [--dry-run] | merge [--dry-run]', checks.Exit.PRECONDITION)
 
 
 if __name__ == '__main__':

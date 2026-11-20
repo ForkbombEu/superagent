@@ -107,7 +107,7 @@ settings through the management API, so a new deployment starts configured:
 | Execution > Executor model                                      | `$SUPERAGENT_EXECUTOR_PROVIDER`, `$SUPERAGENT_EXECUTOR_MODEL`, `$SUPERAGENT_EXECUTOR_REASONING_EFFORT`, when set                                                                                         |
 | Execution > Concurrent Tickets                                  | `$SUPERAGENT_MAX_WORKERS`, when set                                                                                                                                                                      |
 | Execution > Prepare command                                     | `/usr/local/bin/prepare-worktree.sh`                                                                                                                                                                     |
-| Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): the Claude Code review and merge procedure below, followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
+| Prompts > Delivery requirements                                 | [`prompts/delivery.md`](prompts/delivery.md): run `superagent check`, follow `next:`, then the merge procedure below; followed by [`prompts/delivery-uat.md`](prompts/delivery-uat.md) when `SUPERAGENT_UAT_ENABLED` is `true` |
 
 These values win over panel edits: change them in Coolify and redeploy. An
 unset optional variable leaves its setting to the panel. The Ticket directory
@@ -123,28 +123,33 @@ inferred work prematurely.
 ## 4. Claude Code review and automatic merge
 
 DeepSeek implements and opens the PR as the agent account. Before merging, the
-DeepSeek worker runs [`claude-review`](scripts/claude-review) on the PR's exact
-head commit, then follows [`prompts/delivery.md`](prompts/delivery.md):
+DeepSeek worker runs [`superagent check`](scripts/superagent) in the ticket
+directory, then follows [`prompts/delivery.md`](prompts/delivery.md). The
+command finds the repository, PR and head itself, runs the next missing check
+for that head (`uat-test` when UAT is on and has no result, else
+`claude-review`), and prints one compact result with `next:`:
 
 ```mermaid
 flowchart TD
-  A[Push, read PR head sha] --> B[claude-review repo pr sha]
-  B -->|exit 1: FAIL| C[Fix from detail file, push]
+  A[Push, confirm PR head sha] --> B["superagent check (background)"]
+  B --> W["Waiting for checks: PR #n at sha"]
+  W -->|wake or recovery| B2[Read compact result, follow next]
+  B2 -->|next: fix and push / failed reviews| C[Fix from detail file, push]
   C --> A
-  B -->|exit 3: retry| D[One retry, then report blocked]
-  B -->|exit 4: precondition| U[Run named step, usually uat-test]
-  U --> A
-  B -->|exit 0: PASS| E[Mark draft ready, report ready]
+  B2 -->|next: run superagent check| B
+  B2 -->|next: retry| D[One retry, then report blocked]
+  B2 -->|next: stop| X[Report blocked]
+  B2 -->|next: done| E[Mark draft ready, report ready]
   E --> F{head and title still reviewed, required checks passed, no changes requested?}
   F -->|checks pending| F
   F -->|check failed or head changed| C
   F -->|yes| G["gh pr merge --squash --match-head-commit sha --subject 'title (#n)'"]
 ```
 
-`claude-review` is a command rather than DSH's official Claude Code subagent
-tool because dsh-superagent limits its workers to a fixed list of tools
-(`WORK_TOOLS` in its `src/app/sessions.ts`), which hides that tool from them.
-The command:
+`claude-review` remains the Claude Code entry point inside `superagent check`.
+It is a command rather than DSH's official Claude Code subagent tool because
+dsh-superagent limits its workers to a fixed list of tools (`WORK_TOOLS` in its
+`src/app/sessions.ts`), which hides that tool from them. The command:
 
 - checks that the sha is both the PR's head on GitHub and the checked-out
   commit, and reads the PR's title and base branch itself;
@@ -201,16 +206,20 @@ The command:
   run in parallel, up to `SUPERAGENT_MAX_WORKERS`. Each issue must mention
   `@forkboteu` and be opened by an allowed account, so that it becomes a
   Ticket; it must not ask to wait for a person.
-- A lost completion wake-up cannot strand a UAT ticket. Before a worker waits
-  for its detached UAT job, it records `Waiting for UAT: PR #<n> at <sha>`.
-  [`superagent-uat-recovery`](scripts/superagent-uat-recovery) asks the
-  trusted gate for that exact run every minute and retries the blocked ticket
-  once the run has a durable verdict. The resumed worker reads that result and
-  continues with the reviewer, fix, or block path; it does not reset the UAT
-  counter. A ticket gets at most three recovery retries for one SHA.
-- At most three failing reviews per PR; then the worker reports blocked and
-  leaves the PR unmerged. It never uses `--admin`, auto-merge, or changes
-  branch protection; a merge GitHub refuses is reported, not retried.
+- A lost completion wake-up cannot strand a ticket waiting on checks. Before a
+  worker waits for its detached `superagent check` job, it records
+  `Waiting for checks: PR #<n> at <sha>` (older tickets may still say
+  `Waiting for UAT: PR #<n> at <sha>`).
+  [`superagent-uat-recovery`](scripts/superagent-uat-recovery) accepts both
+  markers, asks the trusted gate for that exact run every minute when UAT is
+  on, and retries the blocked ticket once the run has a durable verdict. The
+  resumed worker runs `superagent check` again (idempotent per head) and
+  follows `next:`; it does not reset the UAT counter. A ticket gets at most
+  three recovery retries for one SHA.
+- At most three failing reviews per PR, counted from stored reviews by
+  `superagent check`; then the command returns blocked and the worker leaves
+  the PR unmerged. It never uses `--admin`, auto-merge, or changes branch
+  protection; a merge GitHub refuses is reported, not retried.
 - Claude Code runs in a temporary checkout of the reviewed commit, deleted
   afterwards, with `--permission-mode dontAsk` and the managed policy
   [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
@@ -269,29 +278,32 @@ that still holds for the head it merges. Without the section, the result is
 `NOT_REQUIRED` and says that nothing was tested.
 
 UAT follows the same trust model as the Claude Code review. DSH Superagent stays
-the only orchestrator: its worker runs [`uat-test`](scripts/uat-test) as a
-background job, exactly like `claude-review`, and the Delivery requirements
+the only orchestrator: its worker runs [`superagent check`](scripts/superagent)
+as a background job, which calls [`uat-test`](scripts/uat-test) when UAT is the
+next missing step, and the Delivery requirements
 ([`prompts/delivery-uat.md`](prompts/delivery-uat.md)) tell it what each verdict
-means. The tests run independently of the worker, in containers it cannot
-reach, and their result is checked against the exact commit and the issue's
-current UAT spec, but nothing on GitHub enforces the verdict: there is no
-GitHub App, no `superagent/uat` check and no GitHub Actions workflow.
+and `next:` mean. The tests run independently of the worker, in containers it
+cannot reach, and their result is checked against the exact commit and the
+issue's current UAT spec, but nothing on GitHub enforces the verdict: there is
+no GitHub App, no `superagent/uat` check and no GitHub Actions workflow.
 
 ```mermaid
 flowchart TD
-  P[DSH worker pushes head sha] --> U[uat-test repo pr sha, background job]
+  P[DSH worker pushes head sha] --> S["superagent check (background)"]
+  S --> W["Waiting for checks: PR #n at sha"]
+  W --> U[uat-test when UAT has no result for the head]
   U -->|request: repo, PR, sha; never a verdict| G[uat-gate: read issue, spec, environment from GitHub]
-  G -->|no UAT section| N[NOT_REQUIRED, exit 0]
+  G -->|no UAT section| N[NOT_REQUIRED]
   G --> R[uat-runner: sandbox + DeepSeek tester]
   R --> V[uat-gate: validate evidence, re-check head and spec, keep verdict]
   V --> K[uat-test: check the record against sha and spec, post report on PR]
-  K -->|FAIL, exit 1| X[DSH worker fixes and pushes a new head]
+  K -->|FAIL| X[DSH worker fixes and pushes a new head]
   X --> P
-  K -->|BLOCKED, exit 2| B[DSH worker reports blocked, no merge]
-  K -->|PASS, exit 0| C[claude-review on the same sha]
+  K -->|BLOCKED| B[DSH worker reports blocked, no merge]
+  K -->|PASS or NOT_REQUIRED| C[claude-review on the same sha via superagent check]
   N --> C
   C -->|FAIL| X
-  C -->|PASS| M[uat-test --verify, then merge: CI + review + squash merge]
+  C -->|PASS, next done| M[uat-test --verify, then merge: CI + review + squash merge]
 ```
 
 | Function                                                                           | Owner                                                                                        |
@@ -303,10 +315,11 @@ flowchart TD
 | Code review                                                                        | [`claude-review`](scripts/claude-review), which also refuses a head whose UAT has not passed |
 | Build and unit tests                                                               | the project's own CI, unchanged (GitHub Actions or not)                                      |
 
-`uat-test` and `claude-review` share one exit-code contract: `0` pass · `1`
-fail · `2` blocked · `3` retry · `4` precondition. Last line:
-`<command>: <VERDICT> for <sha>`. On a fail, the compact stdout names a detail
-file; workers read it only then. For `uat-test`, `0` is `PASS` or
+`superagent check`, `uat-test` and `claude-review` share one exit-code
+contract: `0` pass · `1` fail · `2` blocked · `3` retry · `4` precondition.
+Last line: `<command>: <VERDICT> for <sha>`; `superagent check` also prints
+`superagent: next <step>`. On a fail, the compact stdout names a detail file;
+workers read it only then. For `uat-test`, `0` is `PASS` or
 `NOT_REQUIRED` of exactly the given SHA, `1` is `FAIL` (back to the coder), `2`
 is `BLOCKED` (one retry when the runner or gate is at fault, else blocked, never
 merged), and `3` is no verdict (gate unreachable, mismatch, or a report that

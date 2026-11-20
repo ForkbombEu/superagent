@@ -602,6 +602,36 @@ class ConfigureTest(unittest.TestCase):
                 f'{name} must say to read the detail file on a fail',
             )
 
+    def test_prompts_run_only_superagent_check(self):
+        """Workers call superagent check; not claude-review or uat-test as the wait job."""
+        import re
+        for name in ('delivery.md', 'delivery-uat.md'):
+            with open(os.path.join(ROOT, 'prompts', name)) as file:
+                text = file.read()
+            self.assertIn('superagent check', text)
+            self.assertIn('Waiting for checks: PR #', text)
+            self.assertRegex(text, r'next')
+            self.assertIsNone(
+                re.search(r'run `claude-review', text),
+                f'{name} must not tell the worker to run claude-review',
+            )
+            self.assertIsNone(
+                re.search(r'`claude-review \$DSH_SUPERAGENT', text),
+                f'{name} must not invoke claude-review with arguments',
+            )
+            self.assertIsNone(
+                re.search(r'run `uat-test \$DSH_SUPERAGENT', text),
+                f'{name} must not tell the worker to run uat-test as the check',
+            )
+            self.assertIsNone(
+                re.search(r'`uat-test \$DSH_SUPERAGENT', text),
+                f'{name} must not invoke uat-test with repo/pr/sha arguments',
+            )
+            self.assertIsNone(
+                re.search(r'record each review', text, re.I),
+                f'{name} must not count reviews via orchestrator_report',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

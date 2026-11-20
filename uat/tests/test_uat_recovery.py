@@ -42,6 +42,10 @@ class RecoveryTest(unittest.TestCase):
         self.sweep(self.ticket(f'Waiting for UAT: PR #17 at {SHA}'), {'state': 'COMPLETE', 'verdict': 'PASS'})
         self.assertEqual(self.posts, [('POST', 'tickets/ticket-1/retry')])
 
+    def test_completed_checks_retries_the_waiting_ticket(self):
+        self.sweep(self.ticket(f'Waiting for checks: PR #17 at {SHA}'), {'state': 'COMPLETE', 'verdict': 'PASS'})
+        self.assertEqual(self.posts, [('POST', 'tickets/ticket-1/retry')])
+
     def test_running_uat_does_not_retry_the_ticket(self):
         self.sweep(self.ticket(f'Waiting for UAT: PR #17 at {SHA}'), {'state': 'RUNNING', 'verdict': None})
         self.assertEqual(self.posts, [])

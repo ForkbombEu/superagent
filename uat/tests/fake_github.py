@@ -32,8 +32,8 @@ class FakeGitHub:
     def add_issue(self, number, body):
         self.issues[number] = {'number': number, 'body': body, 'updated_at': f'2026-11-09T10:00:{number % 60:02d}Z'}
 
-    def add_pr(self, number, sha, closes, fork=False):
-        self.prs[number] = {'number': number, 'state': 'open', 'closes': list(closes),
+    def add_pr(self, number, sha, closes, fork=False, title='feat: x'):
+        self.prs[number] = {'number': number, 'state': 'open', 'closes': list(closes), 'title': title,
                             'head': {'sha': sha, 'repo': {'full_name': 'someone/fork' if fork else self.repository}}}
 
     def push(self, number, sha):
@@ -50,7 +50,7 @@ class FakeGitHub:
         parts = path[len(repo):].split('/')
         if method == 'GET' and parts[0] == 'pulls' and len(parts) == 2:
             pr = self.prs[int(parts[1])]
-            return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': 'feat: x'}
+            return 200, {'number': pr['number'], 'state': pr['state'], 'head': pr['head'], 'title': pr['title']}
         if method == 'GET' and parts[0] == 'issues':
             number = int(parts[1])
             if number in self.prs:  # GitHub's issues API answers pull requests too, marked as such.

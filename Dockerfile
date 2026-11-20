@@ -83,12 +83,21 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
 # SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
-COPY dsh/profile.patch.yml /usr/local/share/superagent/profile.patch.yml
 COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/superagent/roles/
+# Deployment-owned roles file + loader: render cordis.patch.yml at image build (F6.2).
+COPY superagent.yaml superagent.schema.json /usr/local/share/superagent/
+COPY scripts/superagent_config.py /usr/local/share/superagent/superagent_config.py
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-pip \
+ && pip3 install --no-cache-dir pyyaml jsonschema \
+ && python3 /usr/local/share/superagent/superagent_config.py render-profile \
+      /usr/local/share/superagent/superagent.yaml \
+      -o /usr/local/share/superagent/profile.patch.yml \
+ && rm -rf /var/lib/apt/lists/*
 
 USER agent
 
-# Seed the DSH profile at image build time from the reviewable patch in-repo.
+# Seed the DSH profile at image build time from the generated patch (superagent.yaml).
 # On first use, Docker copies the image's /home/agent contents into an empty
 # named volume at that mountpoint.
 RUN set -eu; \

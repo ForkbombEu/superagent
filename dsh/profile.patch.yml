@@ -1,6 +1,6 @@
 # Superagent profile: loopback webserver, stateDir, worker subagent allowlist,
-# role presets (explorer / frontend / devops), and Host model-selection routes.
-# Loader replaces a row's config wholesale — see docs/adr/0001-worker-presets.md.
+# role presets, and Host model-selection routes — generated from superagent.yaml
+# at image build (F6.2). See docs/adr/0001-worker-presets.md.
 - id: webserver
   config:
     host: 127.0.0.1
@@ -10,13 +10,16 @@
     stateDir: /home/agent/.dsh/state/superagent
 
 # Host authorization for explicit child model routes (ADR § Subagent model routes).
-# enabled + allowedModels come from SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_* at
-# DSH load; empty tiers leave the setting off. Configure validates the same env.
+# enabled + allowedModels are baked from superagent.yaml tiers at image build (F6.2).
+# Start-time SUPERAGENT_TIER_* env still validated by configure; wiring that back
+# into this Host setting is F6.3.
 - id: subagent-model-selection-settings
   name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
   config:
-    enabled: !!js "((() => { const routes = []; const seen = new Set(); const add = (p, m) => { p = (p || '').trim(); m = (m || '').trim(); if (!p || !m) return; const key = p + '\\0' + m; if (seen.has(key)) return; seen.add(key); routes.push({ provider: p, model: m }); }; add(process.env.SUPERAGENT_TIER_LOW_PROVIDER, process.env.SUPERAGENT_TIER_LOW_MODEL); add(process.env.SUPERAGENT_TIER_MID_PROVIDER, process.env.SUPERAGENT_TIER_MID_MODEL); return routes; })()).length > 0"
-    allowedModels: !!js "(() => { const routes = []; const seen = new Set(); const add = (p, m) => { p = (p || '').trim(); m = (m || '').trim(); if (!p || !m) return; const key = p + '\\0' + m; if (seen.has(key)) return; seen.add(key); routes.push({ provider: p, model: m }); }; add(process.env.SUPERAGENT_TIER_LOW_PROVIDER, process.env.SUPERAGENT_TIER_LOW_MODEL); add(process.env.SUPERAGENT_TIER_MID_PROVIDER, process.env.SUPERAGENT_TIER_MID_MODEL); return routes; })()"
+    enabled: true
+    allowedModels:
+      - provider: deepseek-official
+        model: deepseek-flash
 
 # Full restatement of the plugin's worker preset with allowedAgentPresets on the
 # nested tool-subagent (Host top-level tool-subagent is a different row).

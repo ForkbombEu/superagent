@@ -1,9 +1,19 @@
 import { AssistantChatTransport, useChatRuntime } from '@assistant-ui/ai-sdk';
-import { AssistantRuntimeProvider } from '@assistant-ui/react';
+import { createLocalStorageAdapter } from '@assistant-ui/core/react';
+import {
+  AssistantRuntimeProvider,
+  useRemoteThreadListRuntime,
+} from '@assistant-ui/react';
 import { useEffect, useState, type FC } from 'react';
+import { browserLocalStorage, CONSOLE_THREAD_PREFIX } from './localStorage';
 import { Thread } from './Thread';
 
 type Config = { configured: boolean; model: string };
+
+const threadAdapter = createLocalStorageAdapter({
+  storage: browserLocalStorage,
+  prefix: CONSOLE_THREAD_PREFIX,
+});
 
 export const App: FC = () => {
   const [config, setConfig] = useState<Config | null>(null);
@@ -45,12 +55,20 @@ export const App: FC = () => {
   return <ConfiguredChat />;
 };
 
-const ConfiguredChat: FC = () => {
-  const runtime = useChatRuntime({
-    transport: new AssistantChatTransport({
-      api: '/console/api/chat',
-    }),
+function useConsoleRuntime() {
+  return useRemoteThreadListRuntime({
+    adapter: threadAdapter,
+    runtimeHook: () =>
+      useChatRuntime({
+        transport: new AssistantChatTransport({
+          api: '/console/api/chat',
+        }),
+      }),
   });
+}
+
+const ConfiguredChat: FC = () => {
+  const runtime = useConsoleRuntime();
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

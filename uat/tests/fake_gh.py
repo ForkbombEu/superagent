@@ -109,5 +109,14 @@ elif args[:2] == ['pr', 'checks']:
 elif args[:2] == ['pr', 'ready']:
     number = args[2]
     call('POST', f'repos/{repository}/pulls/{number}/ready', {})
+elif args[:2] == ['pr', 'merge']:
+    refusal = os.environ.get('FAKE_GH_FAIL_MERGE')
+    if refusal is not None:
+        sys.stderr.write(refusal if refusal.endswith('\n') else refusal + '\n')
+        sys.exit(1)
+    log = os.environ.get('FAKE_GH_MERGE_LOG')
+    if log:
+        with open(log, 'a', encoding='utf-8') as handle:
+            handle.write(json.dumps(args) + '\n')
 else:
     sys.exit(f'fake gh: unsupported {args}')

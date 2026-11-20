@@ -55,6 +55,8 @@ Configure Environment Variables:
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code credential for the PR reviewer (runtime only); set one. The subscription token comes from `claude setup-token`                                                                                                                                                                                                                                                                 |
 | `SUPERAGENT_REVIEWER_MODEL`                      | Optional. Claude Code reviewer model: an alias such as `opus` or `sonnet`, or a full model id; empty uses Claude Code's default for the account                                                                                                                                                                                                                                            |
 | `SUPERAGENT_REVIEWER_EFFORT`                     | Optional. Claude Code reviewer effort: `low`, `medium`, `high`, `xhigh` or `max`; empty uses Claude Code's default (`high`)                                                                                                                                                                                                                                                                |
+| `SUPERAGENT_REVIEWER_SMALL_MODEL`                | Optional. Cheaper Claude Code model for small diffs; empty keeps a single `SUPERAGENT_REVIEWER_MODEL`                                                                                                                                                                                                                                                                                     |
+| `SUPERAGENT_REVIEWER_SMALL_DIFF_LINES`           | Optional. Changed-line threshold for the small model (default `200` when the small model is set)                                                                                                                                                                                                                                                                                          |
 | `SUPERAGENT_UAT_ENABLED`                         | Optional, `false` by default. `true` turns on [user acceptance tests](#5-user-acceptance-tests), run by the `uat-gate` and `uat-runner` services, which start only with `COMPOSE_PROFILES=uat`; it needs `SUPERAGENT_UAT_GATE_TOKEN` (32+ random characters, shared with `uat-gate`). No GitHub App is needed; the other `SUPERAGENT_UAT_*` settings are in [`.env.example`](.env.example) |
 | `COMPOSE_PROFILES`                               | Optional. `uat` starts the UAT services (`uat-gate`, and the privileged `uat-runner`); leave it unset while UAT is off. Set it together with `SUPERAGENT_UAT_ENABLED=true`                                                                                                                                                                                                                 |
 | `SUPERAGENT_GITHUB_ALLOWED_USERS`                | Optional. GitHub logins that may ask for work, comma- or space-separated, e.g. `matteo-cristino`                                                                                                                                                                                                                                                                                           |
@@ -170,17 +172,19 @@ dsh-superagent limits its workers to a fixed list of tools (`WORK_TOOLS` in its
   `**Claude Code review** of <sha>: PASS|FAIL` comment, the record of each
   round, and keeps the whole answer in the volume under
   `~/.local/state/claude-review/<owner>/<repo>/pr-<n>/`, as the worker's input
-  and the next review's history. A later run for the same sha and title reuses
-  that stored review (and posts it if the comment is still missing) instead of
-  calling Claude again;
-- prints a compact result ending with `claude-review: <VERDICT> for <sha>`, and
+  and the next review's history. A later run for the same sha, title and model
+  reuses that stored review (and posts it if the comment is still missing)
+  instead of calling Claude again. When `SUPERAGENT_REVIEWER_SMALL_MODEL` is
+  set, the model is chosen from the changed-line count against the PR base;
+- prints a compact result ending with `claude-review: <VERDICT> for <sha>`
+  (and `claude-review: model <id>` when a model was chosen), and
   on a FAIL names the detail file with the Fix plan; workers read that file only
   on a fail;
 - exits under the shared check contract: `0` pass · `1` fail · `2` blocked ·
   `3` retry · `4` precondition. `claude-review` uses `0`/`1`, `3` for no usable
   review or a comment that could not be posted, and `4` when UAT has not passed
   for the sha (it does not return `2`);
-- reads the Claude credential, `SUPERAGENT_REVIEWER_MODEL` and
+- reads the Claude credential, reviewer model(s) and
   `SUPERAGENT_REVIEWER_EFFORT` from `/run/superagent-secrets/claude-review.json`,
   which the entrypoint writes to the container's tmpfs: DSH strips variables
   named `*_KEY`/`*_TOKEN` from worker shells.

@@ -40,7 +40,7 @@ install -m 0600 /dev/null /run/superagent-secrets/github-token
 printf '%s' "$GH_TOKEN" > /run/superagent-secrets/github-token
 unset GH_TOKEN GITHUB_TOKEN
 
-# claude-review reads the Claude Code credential, model and effort from here:
+# claude-review reads the Claude Code credential, model(s) and effort from here:
 # DSH strips *_KEY/*_TOKEN variables from worker shells, and neither DSH nor
 # DeepSeek needs them in their environment.
 install -m 0600 /dev/null /run/superagent-secrets/claude-review.json
@@ -48,8 +48,13 @@ python3 > /run/superagent-secrets/claude-review.json <<'PY'
 import json, os
 credentials = {name: os.environ[name] for name in ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN') if os.environ.get(name)}
 effort = os.environ.get('SUPERAGENT_REVIEWER_EFFORT')
-print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
-                  'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}))
+config = {'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
+          'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}
+small = os.environ.get('SUPERAGENT_REVIEWER_SMALL_MODEL', '')
+if small:
+    config['small_model'] = small
+    config['small_diff_lines'] = int(os.environ.get('SUPERAGENT_REVIEWER_SMALL_DIFF_LINES') or 200)
+print(json.dumps(config))
 PY
 unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
 

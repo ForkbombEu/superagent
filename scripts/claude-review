@@ -11,8 +11,10 @@ a temporary checkout, where it may run the tests, with the prompt in
 
 Claude Code answers with a Summary, a Review and a Fix plan. The Summary is posted
 on the PR; the whole answer is kept under ~/.local/state/claude-review with its sha,
-title and verdict. A later run for the same sha and title reuses that stored review
-(and posts it if the comment is still missing) instead of calling Claude again.
+title, verdict and model. A later run for the same sha, title and model reuses that
+stored review (and posts it if the comment is still missing) instead of calling Claude again.
+When SUPERAGENT_REVIEWER_SMALL_MODEL is set, the model is chosen from the changed-line
+count against the PR base (threshold SUPERAGENT_REVIEWER_SMALL_DIFF_LINES, default 200).
 
 When the deployment runs user acceptance tests, it reviews only a <head sha>
 whose UAT passed (or needs none) and still holds (`uat-test --verify`).
@@ -44,6 +46,36 @@ TIMEOUT_SECONDS = 1800
 MAX_HISTORY = 80000
 CHECK = 'claude-review'
 MAX_FAILED_REVIEWS = 3
+DEFAULT_SMALL_DIFF_LINES = 200
+
+
+def select_reviewer_model(config, changed_lines):
+    """Pick the Claude model for this diff size; no small_model keeps a single model."""
+    small = (config.get('small_model') or '').strip()
+    large = config.get('model') or ''
+    if not small:
+        return large
+    threshold = config.get('small_diff_lines')
+    if threshold is None or threshold == '':
+        threshold = DEFAULT_SMALL_DIFF_LINES
+    else:
+        threshold = int(threshold)
+    if changed_lines <= threshold:
+        return small
+    return large
+
+
+def count_changed_lines(base, sha):
+    """Added plus deleted lines between base and sha (`git diff --numstat`)."""
+    output = run('git', 'diff', '--numstat', f'{base}...{sha}')
+    total = 0
+    for line in output.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        total += int(parts[0]) + int(parts[1])
+    return total
+
 
 
 def fail(message, status=checks.Exit.RETRY):
@@ -91,8 +123,9 @@ def history(directory, repository, number):
             + f'\n\n### The latest review in full, with the fix plan the author was given\n{latest}')
 
 
-def review_marker(sha, title):
-    digest = hashlib.sha256(title.encode()).hexdigest()[:12]
+def review_marker(sha, title, model=''):
+    material = title if not model else f'{title}\n{model}'
+    digest = hashlib.sha256(material.encode()).hexdigest()[:12]
     return f'{sha}-{digest}'
 
 
@@ -112,9 +145,10 @@ def load_reviews(directory):
     return rows
 
 
-def find_review(directory, sha, title):
+def find_review(directory, sha, title, model=''):
+    want = model or ''
     for row in load_reviews(directory):
-        if row.get('sha') == sha and row.get('title') == title:
+        if row.get('sha') == sha and row.get('title') == title and (row.get('model') or '') == want:
             return row
     return None
 
@@ -123,11 +157,11 @@ def failed_review_names(directory):
     return [f'{row["_stem"]}.md' for row in load_reviews(directory) if row.get('verdict') == 'FAIL']
 
 
-def save_review(directory, sha, title, verdict, answer):
+def save_review(directory, sha, title, verdict, answer, model=''):
     os.makedirs(directory, exist_ok=True)
-    # One record per sha+title: a title change keeps the earlier review and stores a new one.
-    stem = review_marker(sha, title)
-    payload = {'sha': sha, 'title': title, 'verdict': verdict, 'answer': answer}
+    # One record per sha+title+model: a title or model change keeps the earlier review.
+    stem = review_marker(sha, title, model)
+    payload = {'sha': sha, 'title': title, 'verdict': verdict, 'answer': answer, 'model': model or ''}
     with open(os.path.join(directory, f'{stem}.json'), 'w', encoding='utf-8') as file:
         json.dump(payload, file, indent=2)
         file.write('\n')
@@ -137,7 +171,7 @@ def save_review(directory, sha, title, verdict, answer):
     return md_path
 
 
-def finish(verdict, sha, *, detail_file=None, failed=None, posted=True):
+def finish(verdict, sha, *, detail_file=None, failed=None, posted=True, model=''):
     next_step = rounds_used = rounds_allowed = None
     show_detail = None
     if verdict == 'FAIL':
@@ -153,6 +187,7 @@ def finish(verdict, sha, *, detail_file=None, failed=None, posted=True):
         check=CHECK, verdict=verdict, sha=sha,
         rounds_used=rounds_used, rounds_allowed=rounds_allowed,
         next_step=next_step, detail_file=show_detail,
+        model=model or None,
     )
     code = checks.print_result(result)
     if not posted:
@@ -160,19 +195,20 @@ def finish(verdict, sha, *, detail_file=None, failed=None, posted=True):
     sys.exit(code)
 
 
-def comment_body(sha, verdict, answer):
+def comment_body(sha, verdict, answer, model=''):
     summary = section(answer, 'Summary') or answer
-    return f'**Claude Code review** of {sha}: **{verdict}**\n\n{summary}\n'
+    model_bit = f' (`{model}`)' if model else ''
+    return f'**Claude Code review** of {sha}: **{verdict}**{model_bit}\n\n{summary}\n'
 
 
-def post_review(repository, number, sha, title, verdict, answer, directory):
+def post_review(repository, number, sha, title, verdict, answer, directory, model=''):
     return checks.pr_comment(
-        repository, number, comment_body(sha, verdict, answer),
-        directory=directory, marker=review_marker(sha, title),
+        repository, number, comment_body(sha, verdict, answer, model=model),
+        directory=directory, marker=review_marker(sha, title, model),
     )
 
 
-def run_claude(repository, number, sha, title, base, directory):
+def run_claude(repository, number, sha, title, base, directory, model=''):
     values = {
         '<repository>': repository, '<number>': number, '<title>': title,
         '<base branch>': base, '<sha>': sha, '<history>': history(directory, repository, number),
@@ -183,7 +219,7 @@ def run_claude(repository, number, sha, title, base, directory):
     with open(CONFIG, encoding='utf-8') as file:
         config = json.load(file)
     command = ['claude', '-p', prompt, '--output-format', 'json', '--permission-mode', 'dontAsk',
-               *(['--model', config['model']] if config.get('model') else [])]
+               *(['--model', model] if model else [])]
     # GitHub tokens stay out of Claude Code's environment.
     inherited = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
     claude_env = dict(inherited)
@@ -243,17 +279,27 @@ def main():
                  f'({(check.stdout + check.stderr).strip()[-500:]})', checks.Exit.PRECONDITION)
     title = pr['title']
     directory = checks.history_dir(CHECK, repository, number)
-    stored = find_review(directory, sha, title)
+    run('git', 'fetch', '--no-tags', 'origin', pr['baseRefName'])
+    with open(CONFIG, encoding='utf-8') as file:
+        config = json.load(file)
+    changed = count_changed_lines('FETCH_HEAD', sha)
+    model = select_reviewer_model(config, changed)
+    stored = find_review(directory, sha, title, model)
     if stored:
         detail = os.path.join(directory, f'{stored["_stem"]}.md')
-        posted = post_review(repository, number, sha, title, stored['verdict'], stored['answer'], directory)
-        finish(stored['verdict'], sha, detail_file=detail, failed=failed_review_names(directory), posted=posted)
+        posted = post_review(
+            repository, number, sha, title, stored['verdict'], stored['answer'], directory,
+            model=model,
+        )
+        finish(
+            stored['verdict'], sha, detail_file=detail, failed=failed_review_names(directory),
+            posted=posted, model=model,
+        )
 
-    run('git', 'fetch', '--no-tags', 'origin', pr['baseRefName'])
-    verdict, answer = run_claude(repository, number, sha, title, pr['baseRefName'], directory)
-    detail = save_review(directory, sha, title, verdict, answer)
-    posted = post_review(repository, number, sha, title, verdict, answer, directory)
-    finish(verdict, sha, detail_file=detail, failed=failed_review_names(directory), posted=posted)
+    verdict, answer = run_claude(repository, number, sha, title, pr['baseRefName'], directory, model=model)
+    detail = save_review(directory, sha, title, verdict, answer, model=model)
+    posted = post_review(repository, number, sha, title, verdict, answer, directory, model=model)
+    finish(verdict, sha, detail_file=detail, failed=failed_review_names(directory), posted=posted, model=model)
 
 
 if __name__ == '__main__':

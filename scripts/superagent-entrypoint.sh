@@ -40,9 +40,9 @@ install -m 0600 /dev/null /run/superagent-secrets/github-token
 printf '%s' "$GH_TOKEN" > /run/superagent-secrets/github-token
 unset GH_TOKEN GITHUB_TOKEN
 
-# claude-review reads the Claude Code credential, model and effort from here:
-# DSH strips *_KEY/*_TOKEN variables from worker shells, and neither DSH nor
-# DeepSeek needs them in their environment.
+# claude-review reads the Claude Code credential, model and effort from here.
+# DSH strips *_KEY/*_TOKEN from worker shells; keep CLAUDE_CODE_OAUTH_TOKEN so
+# dsh-claude (plugin-spawned claude) can authenticate — OAuth must remain for dsh-claude.
 install -m 0600 /dev/null /run/superagent-secrets/claude-review.json
 python3 > /run/superagent-secrets/claude-review.json <<'PY'
 import json, os
@@ -51,7 +51,7 @@ effort = os.environ.get('SUPERAGENT_REVIEWER_EFFORT')
 print(json.dumps({'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
                   'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}))
 PY
-unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+unset ANTHROPIC_API_KEY
 
 # uat-test (and claude-review, to require a UAT pass first) read the gate's URL
 # and the request token from here. The token only lets a requester ask for runs;

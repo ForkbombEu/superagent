@@ -129,9 +129,11 @@ head commit, then follows [`prompts/delivery.md`](prompts/delivery.md):
 ```mermaid
 flowchart TD
   A[Push, read PR head sha] --> B[claude-review repo pr sha]
-  B -->|exit 1: FAIL| C[Fix verified blocking findings, push]
+  B -->|exit 1: FAIL| C[Fix from detail file, push]
   C --> A
-  B -->|other exit: no review| D[One retry, then report blocked]
+  B -->|exit 3: retry| D[One retry, then report blocked]
+  B -->|exit 4: precondition| U[Run named step, usually uat-test]
+  U --> A
   B -->|exit 0: PASS| E[Mark draft ready, report ready]
   E --> F{head and title still reviewed, required checks passed, no changes requested?}
   F -->|checks pending| F
@@ -163,10 +165,16 @@ The command:
   `**Claude Code review** of <sha>: PASS|FAIL` comment, the record of each
   round, and keeps the whole answer in the volume under
   `~/.local/state/claude-review/<owner>/<repo>/pr-<n>/`, as the worker's input
-  and the next review's history;
-- exits 0 for PASS, 1 for FAIL, 2 when there is no usable review (nothing
-  posted, for example a timeout after 30 minutes) and 3 when the comment could
-  not be posted;
+  and the next review's history. A later run for the same sha and title reuses
+  that stored review (and posts it if the comment is still missing) instead of
+  calling Claude again;
+- prints a compact result ending with `claude-review: <VERDICT> for <sha>`, and
+  on a FAIL names the detail file with the Fix plan; workers read that file only
+  on a fail;
+- exits under the shared check contract: `0` pass · `1` fail · `2` blocked ·
+  `3` retry · `4` precondition. `claude-review` uses `0`/`1`, `3` for no usable
+  review or a comment that could not be posted, and `4` when UAT has not passed
+  for the sha (it does not return `2`);
 - reads the Claude credential, `SUPERAGENT_REVIEWER_MODEL` and
   `SUPERAGENT_REVIEWER_EFFORT` from `/run/superagent-secrets/claude-review.json`,
   which the entrypoint writes to the container's tmpfs: DSH strips variables
@@ -295,12 +303,16 @@ flowchart TD
 | Code review                                                                        | [`claude-review`](scripts/claude-review), which also refuses a head whose UAT has not passed |
 | Build and unit tests                                                               | the project's own CI, unchanged (GitHub Actions or not)                                      |
 
-`uat-test` exits like `claude-review`: 0 for `PASS` or `NOT_REQUIRED` of exactly
-the given SHA, 1 for `FAIL` (back to the coder), 2 for `BLOCKED` (one retry when
-the runner or gate is at fault, else blocked, never merged), any other status
-for no verdict. It accepts the gate's record only for that exact SHA, PR and
-repository, and a pass only while it still holds for the PR's current head and
-its issue's current spec. It posts the report on the PR, once per run, as
+`uat-test` and `claude-review` share one exit-code contract: `0` pass · `1`
+fail · `2` blocked · `3` retry · `4` precondition. Last line:
+`<command>: <VERDICT> for <sha>`. On a fail, the compact stdout names a detail
+file; workers read it only then. For `uat-test`, `0` is `PASS` or
+`NOT_REQUIRED` of exactly the given SHA, `1` is `FAIL` (back to the coder), `2`
+is `BLOCKED` (one retry when the runner or gate is at fault, else blocked, never
+merged), and `3` is no verdict (gate unreachable, mismatch, or a report that
+could not be posted). It accepts the gate's record only for that exact SHA, PR
+and repository, and a pass only while it still holds for the PR's current head
+and its issue's current spec. It posts the report on the PR, once per run, as
 `claude-review` posts its review. Any new commit is a new head: both earlier
 results stop counting, and the head gets UAT and then a review again. Before
 merging, the worker runs `uat-test --verify` on the head it merges, then the
@@ -484,21 +496,24 @@ unmergeable. Before enabling this version:
 
 ### Troubleshooting
 
-- `uat-test` prints the verdict, each failing scenario with expected,
-  observed and reproduction steps, the reasons for `BLOCKED` and the UAT run
-  id, and posts the same report on the PR. `uat-test --artifact <run id> <path>`
-  prints a kept file: `outcome.json`, `setup.log`, `app-logs/app.log`,
-  `proxy.log` (every allowed and denied connection), and per attempt the
-  prompt, the DSH NDJSON trace and the evidence (`tester/attempt-1/…`,
-  `tester-work/attempt-1/artifacts/…`), with the DeepSeek key, the gate's
-  GitHub token and test credentials redacted.
-- `uat-test` exits 3 when the gate is unreachable for five minutes, refuses
-  the request (wrong token, repository or old head), returns a record that is
-  not for the given SHA, or the PR comment could not be posted. The
+- `uat-test` prints a compact result (detail path, rounds, last line
+  `uat-test: <VERDICT> for <sha>`) and posts the full report on the PR. On a
+  fail, read the detail file for each failing scenario with expected, observed
+  and reproduction steps, the reasons for `BLOCKED` and the UAT run id.
+  `uat-test --artifact <run id> <path>` prints a kept file: `outcome.json`,
+  `setup.log`, `app-logs/app.log`, `proxy.log` (every allowed and denied
+  connection), and per attempt the prompt, the DSH NDJSON trace and the
+  evidence (`tester/attempt-1/…`, `tester-work/attempt-1/votes/…`), with the
+  DeepSeek key, the gate's GitHub token and test credentials redacted.
+- `uat-test` exits `3` (retry) when the gate is unreachable for five minutes,
+  refuses the request (wrong token, repository or old head), returns a record
+  that is not for the given SHA, or the PR comment could not be posted. The
   `uat-gate` log has each request and run (prefix `superagent-uat:`);
   `GET /healthz` says whether the gate is configured.
-- `claude-review` exits 4 when UAT has not passed for its SHA: run `uat-test`
-  for that SHA first.
+- `claude-review` exits `4` (precondition) when UAT has not passed for its SHA:
+  run `uat-test` for that SHA first. No usable review or a comment that could
+  not be posted is exit `3` (retry); a stored review for that sha and title is
+  reused instead of calling Claude again.
 - `BLOCKED` with "the UAT runner is unavailable": `uat-runner` is down, not
   privileged, or its client certificate did not reach the gate (see the
   `uat-gate` log at start).

@@ -589,6 +589,19 @@ class ConfigureTest(unittest.TestCase):
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='false'), base)
         self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='true'), f'{base}\n\n{uat}')
 
+    def test_prompts_name_every_exit_code(self):
+        """Both Delivery procedures name the shared contract codes 0–4."""
+        for name in ('delivery.md', 'delivery-uat.md'):
+            with open(os.path.join(ROOT, 'prompts', name)) as file:
+                text = file.read()
+            for code in ('0', '1', '2', '3', '4'):
+                self.assertIn(f'`{code}`', text, f'{name} must name exit code {code}')
+            self.assertIn('Check exit codes', text)
+            self.assertRegex(
+                text, r'(?i)(read the detail file.*fail|on (a |exit `1`.*)?fail.*detail file|detail file.*only on a fail)',
+                f'{name} must say to read the detail file on a fail',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

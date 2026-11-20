@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""superagent check: the next step for a pull request head.
+
+F2.1: `check --dry-run` resolves repository, PR and head and lists which checks
+already have a stored result for that head. It does not run UAT or review.
+"""
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import superagent_checks as checks
+
+CHECK = 'superagent'
+
+
+def fail(message, status=checks.Exit.PRECONDITION):
+    print(f'{CHECK}: {message}', file=sys.stderr)
+    sys.exit(status)
+
+
+def git(*args):
+    result = subprocess.run(['git', *args], capture_output=True, text=True)
+    if result.returncode:
+        fail(f'git {" ".join(args)} failed: {result.stderr.strip()}')
+    return result.stdout.strip()
+
+
+def resolve():
+    repository = os.environ.get('DSH_SUPERAGENT_GITHUB_REPOSITORY', '').strip()
+    if not repository:
+        fail('DSH_SUPERAGENT_GITHUB_REPOSITORY is not set')
+    sha = git('rev-parse', 'HEAD')
+    view = checks.gh('pr', 'view', '--repo', repository, '--json', 'number,headRefOid')
+    if view.returncode:
+        fail('no pull request for the current branch')
+    pr = json.loads(view.stdout)
+    number, head = pr['number'], pr['headRefOid']
+    if head != sha:
+        behind = subprocess.run(['git', 'merge-base', '--is-ancestor', sha, head], capture_output=True)
+        if behind.returncode == 0:
+            fail(f'local HEAD is behind the PR head {head}: run git pull')
+        fail(f'the PR head is {head}, not {sha}: run against the current head')
+    return repository, number, sha
+
+
+def stored_uat(directory, sha):
+    if not os.path.isdir(directory):
+        return None
+    marker = f'-{sha[:12]}.md'
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(marker):
+            return name
+    return None
+
+
+def stored_review(directory, sha):
+    if not os.path.isdir(directory):
+        return None
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith('.json'):
+            continue
+        path = os.path.join(directory, name)
+        with open(path, encoding='utf-8') as file:
+            data = json.load(file)
+        if data.get('sha') == sha:
+            return data
+    return None
+
+
+def dry_run():
+    repository, number, sha = resolve()
+    print(f'{CHECK} check: {repository}#{number} at {sha}')
+    uat_dir = checks.history_dir('uat-test', repository, number)
+    review_dir = checks.history_dir('claude-review', repository, number)
+    uat = stored_uat(uat_dir, sha)
+    if uat:
+        print(f'uat-test: result for {sha} ({uat})')
+    else:
+        print(f'uat-test: no result for {sha}')
+    review = stored_review(review_dir, sha)
+    if review:
+        print(f'claude-review: {review["verdict"]} for {sha}')
+    else:
+        print(f'claude-review: no result for {sha}')
+    sys.exit(checks.Exit.PASS)
+
+
+def main(args):
+    if args == ['check', '--dry-run']:
+        dry_run()
+    fail(f'usage: {CHECK} check --dry-run', checks.Exit.PRECONDITION)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

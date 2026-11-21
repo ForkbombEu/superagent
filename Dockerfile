@@ -95,14 +95,19 @@ RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
     /usr/local/bin/superagent \
     /usr/local/bin/superagent_checks.py
 # Claude Code policies (managed settings take precedence over user/repo settings):
-# review stays locked (no MCP / no edits); chat allows codebase-memory MCP + Edit/Write/Agent.
-# claude-agent defaults CLAUDE_CODE_MANAGED_SETTINGS_PATH to the chat dir (settings +
-# managed-mcp.json); claude-review pins the review dir (no managed-mcp seed).
+# review stays locked (no MCP tool allow rules / no edits); chat allows
+# codebase-memory MCP + Edit/Write/Agent/Task.
+# claude-agent defaults CLAUDE_CODE_MANAGED_SETTINGS_PATH to the chat dir;
+# claude-review pins /etc/claude-code (review settings).
+# Claude Code 2.1.318 loads enterprise managed-mcp.json only from
+# /etc/claude-code/ (not from CLAUDE_CODE_MANAGED_SETTINGS_PATH). Seed the same
+# chat MCP there; review still denies mcp__* under dontAsk (not in its allow list).
 # The review prompt and Delivery requirements follow
 # (delivery-uat.md only when SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.review.json /etc/claude-code/managed-settings.json
 COPY claude-code/managed-settings.chat.json /etc/claude-code-chat/managed-settings.json
 COPY claude-code/managed-mcp.chat.json /etc/claude-code-chat/managed-mcp.json
+COPY claude-code/managed-mcp.chat.json /etc/claude-code/managed-mcp.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
 COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/superagent/roles/
 # Deployment-owned roles file + loader: render cordis.patch.yml at image build (F6.2).

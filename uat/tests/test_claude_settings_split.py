@@ -32,6 +32,9 @@ class ClaudeSettingsSplit(unittest.TestCase):
         self.assertIn('Edit', chat['permissions']['allow'])
         self.assertIn('Write', chat['permissions']['allow'])
         self.assertIn('Agent', chat['permissions']['allow'])
+        self.assertIn('Task', chat['permissions']['allow'])
+        self.assertIn('mcp__codebase-memory__*', chat['permissions']['allow'])
+        self.assertNotIn('mcp__codebase-memory__*', review['permissions']['allow'])
         self.assertEqual(chat['permissions']['disableBypassPermissionsMode'], 'disable')
         self.assertEqual(review['permissions']['disableBypassPermissionsMode'], 'disable')
 
@@ -50,7 +53,7 @@ class ClaudeSettingsSplit(unittest.TestCase):
         with open(REVIEW, encoding='utf-8') as file:
             self.assertEqual(json.load(file)['allowedMcpServers'], [])
 
-    def test_dockerfile_installs_and_seeds_chat_mcp_only(self):
+    def test_dockerfile_seeds_chat_mcp_for_enterprise_and_chat_paths(self):
         with open(DOCKERFILE, encoding='utf-8') as file:
             dockerfile = file.read()
         self.assertRegex(dockerfile, r'codebase-memory-mcp@\$\{CODEBASE_MEMORY_MCP_VERSION\}')
@@ -59,7 +62,11 @@ class ClaudeSettingsSplit(unittest.TestCase):
             'COPY claude-code/managed-mcp.chat.json /etc/claude-code-chat/managed-mcp.json',
             dockerfile,
         )
-        self.assertNotIn('/etc/claude-code/managed-mcp.json', dockerfile)
+        # Claude Code 2.1.318 loads enterprise MCP only from /etc/claude-code/.
+        self.assertIn(
+            'COPY claude-code/managed-mcp.chat.json /etc/claude-code/managed-mcp.json',
+            dockerfile,
+        )
         self.assertIn('CBM_CACHE_DIR=/home/agent/.cache/codebase-memory-mcp', dockerfile)
 
     def test_entrypoint_indexes_live_checkout_best_effort(self):

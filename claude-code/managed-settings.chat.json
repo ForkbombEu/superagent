@@ -17,6 +17,8 @@
       "Grep",
       "Glob",
       "Agent",
+      "Task",
+      "mcp__codebase-memory__*",
       "Bash(git:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",

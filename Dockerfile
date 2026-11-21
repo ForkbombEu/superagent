@@ -98,10 +98,12 @@ RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
 # review stays locked (no MCP tool allow rules / no edits); chat allows
 # codebase-memory MCP + Edit/Write/Agent/Task.
 # claude-agent defaults CLAUDE_CODE_MANAGED_SETTINGS_PATH to the chat dir;
-# claude-review pins /etc/claude-code (review settings).
+# claude-review pins /etc/claude-code (review settings) and stays dontAsk.
 # Claude Code 2.1.318 loads enterprise managed-mcp.json only from
 # /etc/claude-code/ (not from CLAUDE_CODE_MANAGED_SETTINGS_PATH). Seed the same
-# chat MCP there; review still denies mcp__* under dontAsk (not in its allow list).
+# chat MCP there so interactive chat can connect; review still denies mcp__*
+# under dontAsk (not in its allow list). superagent-claude also passes
+# mcpServers via the Agent SDK as a second registration path.
 # The review prompt and Delivery requirements follow
 # (delivery-uat.md only when SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
 COPY claude-code/managed-settings.review.json /etc/claude-code/managed-settings.json

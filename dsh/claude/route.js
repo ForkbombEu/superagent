@@ -9,6 +9,7 @@ export const PROVIDER_ID = 'superagent-claude'
 const MODEL_ALIASES = {
   default: 'sonnet',
   opus: 'opus',
+  opusplan: 'opusplan',
   sonnet: 'sonnet',
   haiku: 'haiku',
 }

@@ -62,7 +62,8 @@ class ClaudeSettingsSplit(unittest.TestCase):
             'COPY claude-code/managed-mcp.chat.json /etc/claude-code-chat/managed-mcp.json',
             dockerfile,
         )
-        # Claude Code 2.1.318 loads enterprise MCP only from /etc/claude-code/.
+        # CLI 2.1.318 loads enterprise MCP only from /etc/claude-code/; chat needs
+        # that seed. Review still denies mcp__* under dontAsk (not in allow list).
         self.assertIn(
             'COPY claude-code/managed-mcp.chat.json /etc/claude-code/managed-mcp.json',
             dockerfile,

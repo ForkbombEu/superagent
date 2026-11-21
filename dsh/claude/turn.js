@@ -2,8 +2,11 @@
  * One DSH step = one Claude Code Agent SDK query(). Maps SDK messages to
  * text/reasoning StreamChunks only (no tool-call blocks).
  */
+import { join } from 'node:path'
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { buildClaudeEnv } from './credentials.js'
+import { createCanUseTool } from './can-use-tool.js'
+import { buildClaudeEnv, MANAGED_SETTINGS_PATH } from './credentials.js'
+import { loadPermissionRules } from './permissions.js'
 import { getClaudeSessionId, setClaudeSessionId } from './sessions.js'
 
 export const PROVIDER_ID = 'superagent-claude'
@@ -13,6 +16,20 @@ export const DEFAULT_CLAUDE_EXECUTABLE = '/usr/local/bin/claude'
 
 /** Max characters shown for Bash activity lines (truncate long commands). */
 export const ACTIVITY_BASH_MAX = 120
+
+/**
+ * Chat MCP servers also passed via the Agent SDK. Enterprise managed-mcp is
+ * still seeded at `/etc/claude-code/` (CLI 2.1.318 loads only that path);
+ * `alwaysLoad` avoids deferring tools behind ToolSearch on the first turn.
+ */
+export const CHAT_MCP_SERVERS = Object.freeze({
+  'codebase-memory': {
+    type: 'stdio',
+    command: 'codebase-memory-mcp',
+    args: [],
+    alwaysLoad: true,
+  },
+})
 
 const REJECTED_PURPOSES = new Set([
   'session-title',
@@ -118,7 +135,12 @@ export function isFailedResumeResult(message, resumed) {
   const row = /** @type {{ type?: string, subtype?: string, errors?: string[] }} */ (message)
   if (row.type !== 'result') return false
   if (!row.subtype || row.subtype === 'success') return false
-  const detail = Array.isArray(row.errors) ? row.errors.join(' ') : String(row.subtype)
+  // Empty errors on a non-success result after resume: treat as failed resume
+  // (SDK may omit the reason string while still failing the resume attempt).
+  if (Array.isArray(row.errors) && row.errors.length === 0) return true
+  const detail = Array.isArray(row.errors) && row.errors.length > 0
+    ? row.errors.join(' ')
+    : String(row.subtype)
   return /resume|session/i.test(detail)
 }
 
@@ -291,10 +313,28 @@ async function* consumeQuery({ messages, options, controller, agentId, state, te
  * @param {object} args
  * @param {import('@deepseek-ai/dsh-llm').GenerateOptions} args.options
  * @param {unknown} args.agent
- * @param {{ executable?: string, buildEnv?: typeof buildClaudeEnv, runQuery?: typeof query }} [args.deps]
+ * @param {{ request: Function }} [args.approval]
+ * @param {{ ask: Function }} [args.userQuestions]
+ * @param {{ allow: string[], deny: string[] }} [args.permissionRules]
+ * @param {{
+ *   executable?: string,
+ *   buildEnv?: typeof buildClaudeEnv,
+ *   runQuery?: typeof query,
+ *   createCanUseTool?: typeof createCanUseTool,
+ *   loadPermissionRules?: typeof loadPermissionRules,
+ *   managedSettingsPath?: string,
+ *   mcpServers?: typeof CHAT_MCP_SERVERS | Record<string, unknown>,
+ * }} [args.deps]
  * @returns {AsyncGenerator<import('@deepseek-ai/dsh-llm').StreamChunk>}
  */
-export async function* runTurn({ options, agent, deps = {} }) {
+export async function* runTurn({
+  options,
+  agent,
+  approval,
+  userQuestions,
+  permissionRules,
+  deps = {},
+}) {
   if (options.purpose !== undefined && REJECTED_PURPOSES.has(String(options.purpose))) {
     throw new Error(`superagent-claude: auxiliary ${options.purpose} calls are rejected in the MVP`)
   }
@@ -305,6 +345,11 @@ export async function* runTurn({ options, agent, deps = {} }) {
   const buildEnv = deps.buildEnv ?? buildClaudeEnv
   const runQuery = deps.runQuery ?? query
   const executable = deps.executable ?? DEFAULT_CLAUDE_EXECUTABLE
+  const makeCanUseTool = deps.createCanUseTool ?? createCanUseTool
+  const loadRules = deps.loadPermissionRules ?? loadPermissionRules
+  const managedSettingsPath = deps.managedSettingsPath
+    ?? join(MANAGED_SETTINGS_PATH, 'managed-settings.json')
+  const mcpServers = deps.mcpServers ?? CHAT_MCP_SERVERS
 
   const agentId = typeof agent?.id === 'string' ? agent.id : String(options.sessionId ?? '')
   const cwd = agent?.session?.header?.cwd
@@ -321,16 +366,31 @@ export async function* runTurn({ options, agent, deps = {} }) {
   }
   options.signal?.addEventListener('abort', onAbort, { once: true })
 
+  const rules = permissionRules ?? loadRules(managedSettingsPath)
+  const canUseTool = makeCanUseTool({
+    approval,
+    userQuestions,
+    agent,
+    allowRules: rules.allow,
+    denyRules: rules.deny,
+  })
+
   const effort = effortFromReasoning(options.reasoningEffort)
+  const model = options.model
+  // opusplan: Claude Code plan-mode alias; keep host prompts for ExitPlanMode etc.
+  const permissionMode = model === 'opusplan' ? 'plan' : 'default'
   /** @type {Record<string, unknown>} */
   const baseOptions = {
     cwd,
     pathToClaudeCodeExecutable: executable,
     env: buildEnv(),
-    permissionMode: 'dontAsk',
+    permissionMode,
+    permissionPrompts: 'host',
+    canUseTool,
+    mcpServers,
     includePartialMessages: true,
     abortController: controller,
-    model: options.model,
+    model,
     ...(effort === undefined ? {} : { effort }),
   }
 

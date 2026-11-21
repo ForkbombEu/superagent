@@ -16,6 +16,8 @@
     "turn.js",
     "credentials.js",
     "sessions.js",
+    "permissions.js",
+    "can-use-tool.js",
     "cordis.patch.yml",
     "package.json"
   ],

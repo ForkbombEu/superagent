@@ -610,20 +610,23 @@ the superagent image, on every pull request (`.github/workflows/test.yml`).
 
 ## Claude chat managed policy (prep)
 
-Interactive Claude sessions (via `scripts/claude-agent`, and the forthcoming
-`superagent-claude` plugin — see [`docs/claude-plugin.md`](docs/claude-plugin.md))
-use the chat managed policy
+Interactive Claude sessions (via the `superagent-claude` plugin — see
+[`docs/claude-plugin.md`](docs/claude-plugin.md); `scripts/claude-agent` remains
+for legacy paths) use the chat managed policy
 [`claude-code/managed-settings.chat.json`](claude-code/managed-settings.chat.json)
 (`CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat` by default):
 Edit/Write/Agent are allowed, Bypass stays disabled, and MCP is allowlisted for
 `codebase-memory-mcp`. The image installs that binary on `PATH` (pinned
 `0.12.1`) and seeds
 [`claude-code/managed-mcp.chat.json`](claude-code/managed-mcp.chat.json) as
-`/etc/claude-code-chat/managed-mcp.json` (stdio server `codebase-memory`). The
-entrypoint best-effort indexes `$HOME/src/<repo>` into `CBM_CACHE_DIR` on the
-agent home volume; if that fails, chat can still call `index_repository` on
-first use. The PR reviewer keeps the locked review policy above (empty MCP
-allowlist, no managed-mcp seed).
+both `/etc/claude-code-chat/managed-mcp.json` and `/etc/claude-code/managed-mcp.json`
+(Claude Code 2.1.318 loads enterprise MCP only from the latter). The plugin also
+registers that server through the Agent SDK `mcpServers` option. Chat runs
+`permissionMode: 'default'` with a DSH approval bridge (`canUseTool`) that
+auto-allows the managed allow list, honors deny, and prompts for everything
+else. The PR reviewer keeps the locked review policy above (`dontAsk`, empty
+MCP allowlist / no `mcp__*` allow rules), so the shared enterprise MCP seed
+cannot execute under review even though the file is present for chat.
 
 ## 6. Operational notes and limitations
 

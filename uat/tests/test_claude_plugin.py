@@ -188,6 +188,7 @@ class ClaudePluginTurnResume(unittest.TestCase):
                     messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
                   }},
                   agent,
+                  permissionRules: {{ allow: [], deny: [] }},
                   deps: {{
                     runQuery: fakeQuery,
                     buildEnv: () => buildClaudeEnv({{
@@ -271,6 +272,7 @@ class ClaudePluginTurnMapping(unittest.TestCase):
                 messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
               }},
               agent,
+              permissionRules: {{ allow: [], deny: [] }},
               deps: {{
                 runQuery: fakeQuery,
                 buildEnv: () => buildClaudeEnv({{
@@ -408,6 +410,7 @@ class ClaudePluginTurnMapping(unittest.TestCase):
                     messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
                   }},
                   agent,
+                  permissionRules: {{ allow: [], deny: [] }},
                   deps: {{
                     runQuery: fakeQuery,
                     buildEnv: () => buildClaudeEnv({{
@@ -426,6 +429,285 @@ class ClaudePluginTurnMapping(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             report = json.loads(result.stdout)
             self.assertEqual(report['finish'][0]['kind'], 'aborted')
+
+
+class ClaudePluginPermissions(unittest.TestCase):
+    def test_rule_matching_bash_prefix_and_mcp_glob(self):
+        script = textwrap.dedent('''\
+            import { ruleMatches, anyRuleMatches } from './permissions.js'
+            const report = {
+              read: ruleMatches('Read', 'Read', {}),
+              writeDeny: ruleMatches('Write', 'Edit', {}),
+              bashGit: ruleMatches('Bash(git:*)', 'Bash', { command: 'git status' }),
+              bashGitPush: ruleMatches('Bash(git push:*)', 'Bash', { command: 'git push origin main' }),
+              bashNotGit: ruleMatches('Bash(git:*)', 'Bash', { command: 'npm test' }),
+              mcp: ruleMatches(
+                'mcp__codebase-memory__*',
+                'mcp__codebase-memory__search_graph',
+                {},
+              ),
+              mcpMiss: ruleMatches(
+                'mcp__codebase-memory__*',
+                'mcp__other__tool',
+                {},
+              ),
+              denyWins: anyRuleMatches(['WebFetch'], 'WebFetch', {}),
+              allowList: anyRuleMatches(['Read', 'Bash(ls:*)'], 'Bash', { command: 'ls -la' }),
+            }
+            process.stdout.write(JSON.stringify(report))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report['read'])
+        self.assertFalse(report['writeDeny'])
+        self.assertTrue(report['bashGit'])
+        self.assertTrue(report['bashGitPush'])
+        self.assertFalse(report['bashNotGit'])
+        self.assertTrue(report['mcp'])
+        self.assertFalse(report['mcpMiss'])
+        self.assertTrue(report['denyWins'])
+        self.assertTrue(report['allowList'])
+
+    def test_can_use_tool_deny_allow_and_approval_bridge(self):
+        script = textwrap.dedent('''\
+            import { createCanUseTool } from './can-use-tool.js'
+
+            const calls = []
+            const approval = {
+              async request(req) {
+                calls.push({ toolName: req.toolName, reason: req.reason })
+                if (req.toolName === 'WebSearch') return 'rejected'
+                return 'allowed-once'
+              },
+            }
+            const canUseTool = createCanUseTool({
+              approval,
+              agent: { id: 'a1' },
+              allowRules: ['Read', 'mcp__codebase-memory__*', 'Bash(ls:*)'],
+              denyRules: ['WebFetch', 'Bash(git push:*)'],
+            })
+            const opts = { toolUseID: 'tu-1', signal: AbortSignal.abort(), title: 'run tool' }
+            const denied = await canUseTool('WebFetch', {}, opts)
+            const deniedPush = await canUseTool('Bash', { command: 'git push origin HEAD' }, opts)
+            const allowedRead = await canUseTool('Read', { file_path: 'a.ts' }, opts)
+            const allowedMcp = await canUseTool('mcp__codebase-memory__search_graph', {}, opts)
+            const allowedLs = await canUseTool('Bash', { command: 'ls -la' }, opts)
+            const askedOk = await canUseTool('Bash', { command: 'curl https://example.com' }, {
+              ...opts, title: 'curl needs approval',
+            })
+            const askedNo = await canUseTool('WebSearch', { query: 'x' }, opts)
+            process.stdout.write(JSON.stringify({
+              denied, deniedPush, allowedRead, allowedMcp, allowedLs, askedOk, askedNo, calls,
+            }))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['denied']['behavior'], 'deny')
+        self.assertEqual(report['deniedPush']['behavior'], 'deny')
+        self.assertEqual(report['allowedRead'], {'behavior': 'allow', 'toolUseID': 'tu-1'})
+        self.assertEqual(report['allowedMcp']['behavior'], 'allow')
+        self.assertEqual(report['allowedLs']['behavior'], 'allow')
+        self.assertEqual(report['askedOk']['behavior'], 'allow')
+        self.assertEqual(report['askedNo']['behavior'], 'deny')
+        self.assertEqual(
+            [c['toolName'] for c in report['calls']],
+            ['Bash', 'WebSearch'],
+        )
+
+    def test_ask_user_question_bridges_to_user_questions(self):
+        script = textwrap.dedent('''\
+            import { createCanUseTool, mapAskUserQuestionInput } from './can-use-tool.js'
+
+            const asked = []
+            const userQuestions = {
+              async ask(req) {
+                asked.push(req)
+                return {
+                  answers: [{ id: 'Library', selected: ['date-fns'], custom: undefined }],
+                }
+              },
+            }
+            const canUseTool = createCanUseTool({
+              userQuestions,
+              agent: { id: 'a1' },
+              allowRules: [],
+              denyRules: [],
+            })
+            const input = {
+              questions: [{
+                question: 'Which library?',
+                header: 'Library',
+                options: [
+                  { label: 'date-fns', description: 'small' },
+                  { label: 'moment', description: 'legacy' },
+                ],
+                multiSelect: false,
+              }],
+            }
+            const result = await canUseTool('AskUserQuestion', input, { toolUseID: 'q1' })
+            process.stdout.write(JSON.stringify({
+              result,
+              mapped: mapAskUserQuestionInput(input),
+              askedCount: asked.length,
+              askedAgent: asked[0]?.agent?.id,
+            }))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['result']['behavior'], 'allow')
+        self.assertEqual(report['result']['updatedInput']['answers'], {'Which library?': 'date-fns'})
+        self.assertEqual(report['askedCount'], 1)
+        self.assertEqual(report['askedAgent'], 'a1')
+        self.assertEqual(report['mapped']['questions'][0]['id'], 'Library')
+
+    def test_run_turn_wires_default_permission_mode_and_can_use_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets = os.path.join(tmp, 'claude-review.json')
+            with open(secrets, 'w', encoding='utf-8') as file:
+                json.dump({'env': {'ANTHROPIC_API_KEY': 'test-key-not-real'}}, file)
+            script = textwrap.dedent(f'''\
+                import {{ runTurn }} from './turn.js'
+                import {{ buildClaudeEnv }} from './credentials.js'
+
+                const seen = []
+                async function* fakeQuery({{ options }}) {{
+                  seen.push({{
+                    permissionMode: options.permissionMode,
+                    hasCanUseTool: typeof options.canUseTool === 'function',
+                    mcp: options.mcpServers && options.mcpServers['codebase-memory']
+                      ? options.mcpServers['codebase-memory'].command
+                      : null,
+                  }})
+                  yield {{ type: 'system', subtype: 'init', session_id: 's-perm' }}
+                  yield {{
+                    type: 'result',
+                    subtype: 'success',
+                    result: 'ok',
+                    usage: {{ input_tokens: 1, output_tokens: 1 }},
+                  }}
+                }}
+
+                const agent = {{
+                  id: 'agent-perm',
+                  session: {{ header: {{ cwd: {json.dumps(tmp)} }} }},
+                }}
+                for await (const _ of runTurn({{
+                  options: {{
+                    model: 'haiku',
+                    messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
+                  }},
+                  agent,
+                  permissionRules: {{ allow: ['Read'], deny: ['WebFetch'] }},
+                  deps: {{
+                    runQuery: fakeQuery,
+                    buildEnv: () => buildClaudeEnv({{
+                      secretsPath: {json.dumps(secrets)},
+                      sourceEnv: {{ PATH: '/bin' }},
+                    }}),
+                  }},
+                }})) {{
+                  // drain
+                }}
+                process.stdout.write(JSON.stringify({{ seen }}))
+                ''')
+            result = _node(script, {'DSH_HOME': tmp})
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(report['seen'][0]['permissionMode'], 'default')
+            self.assertTrue(report['seen'][0]['hasCanUseTool'])
+            self.assertEqual(report['seen'][0]['mcp'], 'codebase-memory-mcp')
+
+
+class ClaudePluginTurnResumeEmptyErrors(unittest.TestCase):
+    def test_empty_errors_resume_result_retries_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets = os.path.join(tmp, 'claude-review.json')
+            with open(secrets, 'w', encoding='utf-8') as file:
+                json.dump({'env': {'ANTHROPIC_API_KEY': 'test-key-not-real'}}, file)
+            state_dir = os.path.join(tmp, 'state', 'superagent')
+            os.makedirs(state_dir, exist_ok=True)
+            with open(os.path.join(state_dir, 'claude-sessions.json'), 'w', encoding='utf-8') as file:
+                json.dump({'agent-empty': 'stale-empty-errors'}, file)
+            script = textwrap.dedent(f'''\
+                import {{ runTurn, isFailedResumeResult }} from './turn.js'
+                import {{ getClaudeSessionId }} from './sessions.js'
+                import {{ buildClaudeEnv }} from './credentials.js'
+
+                const emptyFail = {{
+                  type: 'result',
+                  subtype: 'error_during_execution',
+                  errors: [],
+                }}
+                const detected = isFailedResumeResult(emptyFail, true)
+
+                const calls = []
+                async function* fakeQuery({{ options }}) {{
+                  calls.push({{ resume: options.resume ?? null }})
+                  if (options.resume) {{
+                    yield emptyFail
+                    return
+                  }}
+                  yield {{ type: 'system', subtype: 'init', session_id: 'fresh-empty' }}
+                  yield {{
+                    type: 'assistant',
+                    message: {{ content: [{{ type: 'text', text: 'recovered' }}] }},
+                  }}
+                  yield {{
+                    type: 'result',
+                    subtype: 'success',
+                    result: 'recovered',
+                    usage: {{ input_tokens: 1, output_tokens: 1 }},
+                  }}
+                }}
+
+                const agent = {{
+                  id: 'agent-empty',
+                  session: {{ header: {{ cwd: {json.dumps(tmp)} }} }},
+                }}
+                const chunks = []
+                for await (const chunk of runTurn({{
+                  options: {{
+                    model: 'haiku',
+                    messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
+                  }},
+                  agent,
+                  permissionRules: {{ allow: [], deny: [] }},
+                  deps: {{
+                    runQuery: fakeQuery,
+                    buildEnv: () => buildClaudeEnv({{
+                      secretsPath: {json.dumps(secrets)},
+                      sourceEnv: {{ PATH: '/bin' }},
+                    }}),
+                  }},
+                }})) {{
+                  chunks.push(chunk)
+                }}
+                const texts = chunks
+                  .filter((c) => c.type === 'text-delta')
+                  .map((c) => c.text)
+                  .join('')
+                process.stdout.write(JSON.stringify({{
+                  detected,
+                  callCount: calls.length,
+                  firstResume: calls[0]?.resume ?? null,
+                  secondResume: calls[1]?.resume ?? null,
+                  texts,
+                  stored: getClaudeSessionId('agent-empty'),
+                }}))
+                ''')
+            result = _node(script, {'DSH_HOME': tmp})
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = json.loads(result.stdout)
+            self.assertTrue(report['detected'])
+            self.assertEqual(report['callCount'], 2)
+            self.assertEqual(report['firstResume'], 'stale-empty-errors')
+            self.assertIsNone(report['secondResume'])
+            self.assertIn('started a fresh session', report['texts'])
+            self.assertIn('recovered', report['texts'])
+            self.assertEqual(report['stored'], 'fresh-empty')
 
 
 class ClaudePluginDockerfile(unittest.TestCase):

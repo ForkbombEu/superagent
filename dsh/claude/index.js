@@ -6,13 +6,19 @@ import { PROVIDER_ID, resolveAgent, runTurn } from './turn.js'
 import { canonicalModelId } from './route.js'
 
 export const name = 'superagent-claude'
-export const inject = ['llm', 'agents', 'agentPresets']
+export const inject = ['llm', 'agents', 'agentPresets', 'approval', 'userQuestions']
 
 const MODELS = [
   {
     id: 'opus',
     name: 'Opus',
     description: 'Claude Opus via Claude Code',
+    contextWindow: 200_000,
+  },
+  {
+    id: 'opusplan',
+    name: 'Opus (plan)',
+    description: 'Claude Opus in plan mode via Claude Code',
     contextWindow: 200_000,
   },
   {
@@ -32,10 +38,15 @@ const MODELS = [
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 class SuperagentClaudeAdapter extends LlmAdapter {
-  /** @param {{ get: Function, currentInitiator?: Function }} agents */
-  constructor(agents) {
+  /**
+   * @param {{ get: Function, currentInitiator?: Function }} agents
+   * @param {{ approval?: { request: Function }, userQuestions?: { ask: Function } }} bridges
+   */
+  constructor(agents, bridges = {}) {
     super()
     this.agents = agents
+    this.approval = bridges.approval
+    this.userQuestions = bridges.userQuestions
   }
 
   providerInfo(provider) {
@@ -94,7 +105,12 @@ class SuperagentClaudeAdapter extends LlmAdapter {
       throw new Error(`superagent-claude: auxiliary ${options.purpose} calls are not supported`)
     }
     const agent = resolveAgent(this.agents, options)
-    yield* runTurn({ options, agent })
+    yield* runTurn({
+      options,
+      agent,
+      approval: this.approval,
+      userQuestions: this.userQuestions,
+    })
   }
 }
 
@@ -102,5 +118,11 @@ class SuperagentClaudeAdapter extends LlmAdapter {
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
-  ctx.llm.registerAdapter([PROVIDER_ID], new SuperagentClaudeAdapter(ctx.agents))
+  ctx.llm.registerAdapter(
+    [PROVIDER_ID],
+    new SuperagentClaudeAdapter(ctx.agents, {
+      approval: ctx.approval,
+      userQuestions: ctx.userQuestions,
+    }),
+  )
 }

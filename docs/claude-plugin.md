@@ -11,9 +11,10 @@ tools, MCP servers and subagents; the plugin is the bridge.
   Jira, PR actions, worktrees, bilingual chrome), built against DSH 0.1.7 while
   `attesta` runs DSH `0.2.2-rc.5`. We use none of that surface.
 - It spawns Claude through DSH's subprocess service, which strips `*_TOKEN` /
-  `*_KEY`. That is why the image shadows `claude` with `scripts/claude-agent`
-  and keeps `CLAUDE_CODE_OAUTH_TOKEN` on the DSH process. Both are rejected in
-  the PR #40 review.
+  `*_KEY`. The image used to shadow `claude` with `scripts/claude-agent` and
+  keep `CLAUDE_CODE_OAUTH_TOKEN` on the DSH process. Both are rejected in the
+  PR #40 review; Phase 3 removes that shadow and keeps credentials only in the
+  secrets file / child env.
 - It sets `allowDangerouslySkipPermissions: true` and offers Bypass in the UI.
 
 ## The DSH contract (all public, verified against DSH `0.2.2-rc.5` sources and norman-else 0.1.67)
@@ -58,7 +59,7 @@ Per turn, call the Agent SDK `query()` from `@anthropic-ai/claude-agent-sdk`
 | `cwd` | `agent.session.header.cwd` |
 | `pathToClaudeCodeExecutable` | the image's npm `claude` (one CLI version for chat and review) |
 | `env` | scrubbed `process.env` + `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) read from `/run/superagent-secrets/claude-review.json` at turn time + `CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat` |
-| `permissionMode` | `dontAsk` in the MVP (managed allow list decides; everything else is denied without a prompt) |
+| `permissionMode` | `default` (managed allow list auto-allows; deny list denies; everything else asks via DSH `ctx.approval`) |
 | `resume` | the Claude session id stored for this DSH agent |
 | `model`, `effort` | from the request; aliases `opus`, `sonnet`, `haiku` |
 | `includePartialMessages` | `true`, for streaming text |
@@ -87,9 +88,10 @@ No client bundle in the MVP.
 ### Permissions
 
 Chat policy is `claude-code/managed-settings.chat.json` (Edit/Write/Agent and
-the codebase-memory MCP allowed, Bypass disabled). `dontAsk` means anything
-outside the allow list is denied, not prompted. The DSH approval bridge
-(`ctx.approval` → SDK `canUseTool`) is phase 2.
+the codebase-memory MCP allowed, Bypass disabled). Chat uses
+`permissionMode: 'default'` with the DSH approval bridge (`ctx.approval` → SDK
+`canUseTool`): allow-list tools auto-allow, deny-list tools deny, everything
+else prompts. Review stays `dontAsk` with its locked managed settings.
 
 ## Files
 
@@ -102,7 +104,9 @@ dsh/claude/
   turn.js             one turn: build options, run query(), map SDK messages to StreamChunks
   credentials.js      read the secrets file, build the scrubbed env
   sessions.js         agent id → Claude session id store
-uat/tests/test_claude_plugin.py   node-driven unit tests, like test_primary_workspace.py
+uat/tests/test_claude_plugin.py          node-driven unit tests
+uat/tests/test_primary_workspace.py      promote-only primary workspace
+dsh/primary-workspace/                   host plugin: promote $HOME/src/<repo>
 ```
 
 Dockerfile: copy `dsh/claude` to `/opt/superagent-claude`, `npm ci --omit=dev`

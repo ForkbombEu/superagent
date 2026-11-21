@@ -6,12 +6,15 @@
 FROM docker:29-cli
 
 RUN set -eux; \
-    apk add --no-cache git py3-yaml python3 su-exec; \
+    apk add --no-cache git py3-yaml py3-jsonschema python3 su-exec; \
     adduser -D -u 10020 gate; \
     install -d -o gate -g gate /var/lib/uat-gate /var/lib/uat-work
 
 COPY uat /opt/superagent/uat
 COPY prompts/uat-tester.md /opt/superagent/prompts/uat-tester.md
+# Deployment config: gate fills SUPERAGENT_UAT_* from the file when unset (env wins).
+COPY superagent.yaml superagent.schema.json /usr/local/share/superagent/
+COPY scripts/superagent_config.py /usr/local/share/superagent/superagent_config.py
 COPY uat/gate/entrypoint.sh /usr/local/bin/uat-gate-entrypoint
 RUN chmod 0755 /usr/local/bin/uat-gate-entrypoint
 

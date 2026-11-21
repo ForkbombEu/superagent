@@ -109,6 +109,7 @@ services:
       SUPERAGENT_UAT_GITHUB_TOKEN: ${SUPERAGENT_UAT_GITHUB_TOKEN:-}
       SUPERAGENT_UAT_GATE_TOKEN: ${SUPERAGENT_UAT_GATE_TOKEN:-}
       # The tester's model key, passed only to the tester container on the runner.
+      # Empty SUPERAGENT_UAT_* → uat-gate fills from superagent.yaml (roles.uat-tester).
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?}
       SUPERAGENT_UAT_MODEL: ${SUPERAGENT_UAT_MODEL:-}
       SUPERAGENT_UAT_PROVIDER: ${SUPERAGENT_UAT_PROVIDER:-}

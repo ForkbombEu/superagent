@@ -28,4 +28,27 @@ if [ -n "${DOCKER_CERT_PATH:-}" ]; then
   fi
 fi
 
+# Apply UAT model from superagent.yaml when Coolify left SUPERAGENT_UAT_* empty
+# (loader still lets a set env var win). Export into this process before the gate.
+CONFIG_PATH="${SUPERAGENT_CONFIG_PATH:-/usr/local/share/superagent/superagent.yaml}"
+if [ -f /usr/local/share/superagent/superagent_config.py ] && [ -f "$CONFIG_PATH" ]; then
+  eval "$(python3 - "$CONFIG_PATH" <<'PY'
+import importlib.util, os, shlex, sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location(
+    'superagent_config', '/usr/local/share/superagent/superagent_config.py')
+module = importlib.util.module_from_spec(spec)
+sys.modules['superagent_config'] = module
+spec.loader.exec_module(module)
+try:
+    resolved = module.load(path)
+except module.ValidationError as error:
+    sys.exit(f'uat-gate: {error}')
+for key, value in module.uat_environ(resolved).items():
+    print(f'export {key}={shlex.quote(value)}')
+PY
+)"
+fi
+
 exec su-exec gate "$@"

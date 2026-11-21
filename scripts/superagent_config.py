@@ -360,6 +360,19 @@ def load(path: str, environ: Mapping[str, str] | None = None) -> ResolvedConfig:
     return resolved
 
 
+def uat_environ(resolved: ResolvedConfig) -> dict[str, str]:
+    """Environment for uat-gate / the tester from the resolved UAT surface."""
+    if not resolved.uat:
+        return {}
+    out = {
+        'SUPERAGENT_UAT_PROVIDER': resolved.uat['provider'],
+        'SUPERAGENT_UAT_MODEL': resolved.uat['model'],
+    }
+    if resolved.uat.get('reasoningEffort'):
+        out['SUPERAGENT_UAT_REASONING_EFFORT'] = resolved.uat['reasoningEffort']
+    return out
+
+
 # --- Profile patch rendering (F6.2, image build) ---------------------------------
 
 ROLES_IMAGE_DIR = '/usr/local/share/superagent/roles'
@@ -416,9 +429,8 @@ def _render_host_model_routes(routes: list[dict[str, str]]) -> str:
             lines.append(f"        model: {route['model']}")
         models = '\n' + '\n'.join(lines)
     return f"""# Host authorization for explicit child model routes (ADR § Subagent model routes).
-# enabled + allowedModels are baked from superagent.yaml tiers at image build (F6.2).
-# Start-time SUPERAGENT_TIER_* env still validated by configure; wiring that back
-# into this Host setting is F6.3.
+# enabled + allowedModels come from superagent.yaml tiers (build) and are
+# re-applied at start with SUPERAGENT_TIER_* env overrides (entrypoint --apply-env).
 - id: subagent-model-selection-settings
   name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
   config:
@@ -677,11 +689,16 @@ def main(argv: list[str] | None = None) -> int:
     render = sub.add_parser('render-profile', help='Render cordis.patch.yml from superagent.yaml')
     render.add_argument('path', help='Absolute path to superagent.yaml')
     render.add_argument('--output', '-o', help='Write here instead of stdout')
+    render.add_argument(
+        '--apply-env',
+        action='store_true',
+        help='Apply SUPERAGENT_* environment overrides (start-time; build omits this)',
+    )
     args = parser.parse_args(argv)
 
     if args.command == 'render-profile':
-        # Build-time: file only — do not apply host env (F6.3 wires start-time).
-        resolved = load(args.path, environ={})
+        # Build-time: file only. Start-time (entrypoint --apply-env): env wins.
+        resolved = load(args.path, environ=os.environ if args.apply_env else {})
         text = render_profile_patch(resolved)
         if args.output:
             with open(args.output, 'w', encoding='utf-8') as file:

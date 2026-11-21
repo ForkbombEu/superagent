@@ -23,11 +23,15 @@ from uat.tests.test_spec import ISSUE
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TESTS))
 CLIENT = os.path.join(ROOT, 'scripts', 'uat-test')
+SAMPLE_CONFIG = os.path.join(ROOT, 'superagent.yaml')
 with open(os.path.join(TESTS, 'fixtures', 'app', '.superagent', 'uat.yaml')) as _file:
     CONFIG = _file.read()
 SHA1, SHA2, SHA3, SHA4 = ('1' * 40, '2' * 40, '3' * 40, '4' * 40)
 TOKEN = 'gate-request-token-' + 'x' * 32
 REPOSITORY = 'ForkbombEu/sample'
+# Sample file routes (low+mid collapse to one provider/model).
+SAMPLE_TIER_ROUTES = [{'provider': 'deepseek-official', 'model': 'deepseek-flash'}]
+SAMPLE_EXECUTOR = {'provider': 'deepseek-official', 'model': 'deepseek-flash'}
 
 
 def fake_executor(verdicts):
@@ -571,27 +575,46 @@ class ConfigureTest(unittest.TestCase):
         def call(method, path, body=None):
             if method == 'GET':
                 return 200, view if path == 'settings' else prompts
-            prompts['current']['config']['delivery'] = body['config']['delivery']
+            if path == 'prompts':
+                prompts['current']['config']['delivery'] = body['config']['delivery']
+            elif path == 'settings/executor':
+                view['blocks']['executor']['value'] = body['value']
+                view['blocks']['executor']['revision'] += 1
             return 200, {}
         module.call = call
         saved = dict(os.environ)
         os.environ.clear()
-        os.environ.update({'GITHUB_REPOSITORY': REPOSITORY, **environ})
+        os.environ.update({
+            'GITHUB_REPOSITORY': REPOSITORY,
+            'SUPERAGENT_CONFIG_PATH': SAMPLE_CONFIG,
+            **environ,
+        })
         try:
             self.assertEqual(module.main(), 0)
         finally:
             os.environ.clear()
             os.environ.update(saved)
-        return prompts['current']['config']['delivery']
+        return prompts['current']['config']['delivery'], view['blocks']['executor']['value']
 
     def tier_routes(self, **environ):
         """Call tier_routes under a cleared environment (GITHUB_REPOSITORY not required)."""
         module = self.configure()
         saved = dict(os.environ)
         os.environ.clear()
-        os.environ.update(environ)
+        os.environ.update({'SUPERAGENT_CONFIG_PATH': SAMPLE_CONFIG, **environ})
         try:
             return module.tier_routes()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def executor_settings(self, **environ):
+        module = self.configure()
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update({'SUPERAGENT_CONFIG_PATH': SAMPLE_CONFIG, **environ})
+        try:
+            return module.executor_settings()
         finally:
             os.environ.clear()
             os.environ.update(saved)
@@ -601,13 +624,34 @@ class ConfigureTest(unittest.TestCase):
             base = file.read().strip()
         with open(os.path.join(ROOT, 'prompts', 'delivery-uat.md')) as file:
             uat = file.read().strip()
-        self.assertEqual(self.delivery(), base)
-        self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='false'), base)
-        self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='true'), f'{base}\n\n{uat}')
+        self.assertEqual(self.delivery()[0], base)
+        self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='false')[0], base)
+        self.assertEqual(self.delivery(SUPERAGENT_UAT_ENABLED='true')[0], f'{base}\n\n{uat}')
+
+    def test_executor_comes_from_file_when_env_empty(self):
+        """With only the sample file, configure applies today's executor model."""
+        self.assertEqual(self.executor_settings(), {'model': SAMPLE_EXECUTOR})
+        _, executor = self.delivery()
+        self.assertEqual(executor.get('model'), SAMPLE_EXECUTOR)
+        self.assertEqual(executor.get('prepare'), '/usr/local/bin/prepare-worktree.sh')
+
+    def test_executor_env_overrides_file(self):
+        settings = self.executor_settings(
+            SUPERAGENT_EXECUTOR_PROVIDER='other-provider',
+            SUPERAGENT_EXECUTOR_MODEL='other-model',
+            SUPERAGENT_EXECUTOR_REASONING_EFFORT='high',
+        )
+        self.assertEqual(settings, {
+            'model': {
+                'provider': 'other-provider',
+                'model': 'other-model',
+                'reasoningEffort': 'high',
+            },
+        })
 
     def test_tier_routes_build_host_allowed_models(self):
-        """SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_* become Host allowedModels routes."""
-        self.assertEqual(self.tier_routes(), [])
+        """File supplies Host routes; SUPERAGENT_TIER_* env overrides win."""
+        self.assertEqual(self.tier_routes(), SAMPLE_TIER_ROUTES)
         self.assertEqual(
             self.tier_routes(
                 SUPERAGENT_TIER_LOW_PROVIDER='deepseek-official',

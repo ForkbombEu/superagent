@@ -165,3 +165,21 @@ class SuperagentConfigTest(unittest.TestCase):
         # Callers must pass an absolute deployment/image path, never a PR-relative one.
         with self.assertRaises(self.cfg.ValidationError):
             self.cfg.load('pr-checkout/superagent.yaml', environ={})
+
+    def test_uat_environ_from_sample(self):
+        """uat-gate exports today's UAT model from the file when env is empty."""
+        resolved = self.cfg.load(SAMPLE, environ={})
+        self.assertEqual(self.cfg.uat_environ(resolved), {
+            'SUPERAGENT_UAT_PROVIDER': 'deepseek-official',
+            'SUPERAGENT_UAT_MODEL': 'deepseek-flash',
+        })
+
+    def test_uat_environ_follows_env_override(self):
+        resolved = self.cfg.load(SAMPLE, environ={
+            'SUPERAGENT_UAT_PROVIDER': 'deepseek-official',
+            'SUPERAGENT_UAT_MODEL': 'deepseek-reasoner',
+        })
+        self.assertEqual(self.cfg.uat_environ(resolved), {
+            'SUPERAGENT_UAT_PROVIDER': 'deepseek-official',
+            'SUPERAGENT_UAT_MODEL': 'deepseek-reasoner',
+        })

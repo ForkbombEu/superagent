@@ -112,6 +112,27 @@ elif [ ! -d "$repo_checkout/.git" ]; then
   exit 1
 fi
 
+# Best-effort codebase-memory index of the live checkout for interactive Claude chat.
+# Cache lives on the agent home volume (CBM_CACHE_DIR). Failure only logs; chat can
+# still call index_repository on first use. Review never loads this MCP server.
+export CBM_CACHE_DIR="${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}"
+mkdir -p "$CBM_CACHE_DIR"
+if command -v codebase-memory-mcp >/dev/null 2>&1; then
+  (
+    set +e
+    payload=$(REPO="$repo_checkout" NAME="$repo_name" python3 -c \
+      'import json, os; print(json.dumps({"repo_path": os.environ["REPO"], "name": os.environ["NAME"], "mode": "fast"}))') || {
+      echo 'superagent: codebase-memory index skipped (payload build failed); chat can index on first use' >&2
+      exit 0
+    }
+    echo "superagent: indexing $repo_checkout for codebase-memory-mcp (best-effort)"
+    codebase-memory-mcp cli index_repository "$payload" || \
+      echo 'superagent: codebase-memory index failed; chat can index on first use' >&2
+  ) &
+else
+  echo 'superagent: codebase-memory-mcp not on PATH; chat MCP index deferred' >&2
+fi
+
 # Re-apply Host model routes (and presets) from superagent.yaml + env before DSH
 # loads the profile. Build baked the file alone; start-time SUPERAGENT_TIER_* wins.
 CONFIG_PATH="${SUPERAGENT_CONFIG_PATH:-/usr/local/share/superagent/superagent.yaml}"

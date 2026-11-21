@@ -38,6 +38,9 @@ PROMPT = os.environ.get('CLAUDE_REVIEW_PROMPT', '/usr/local/share/superagent/rev
 # Written by superagent-entrypoint.sh: the Claude credential, model and effort,
 # which DSH strips from worker shells as it does every *_TOKEN/*_KEY variable.
 CONFIG = os.environ.get('CLAUDE_REVIEW_CONFIG', '/run/superagent-secrets/claude-review.json')
+# Locked review policy (no MCP, no Edit/Write). Interactive chat uses
+# /etc/claude-code-chat via claude-agent when this env is unset.
+REVIEW_MANAGED_SETTINGS = '/etc/claude-code'
 # Written by superagent-entrypoint.sh when user acceptance tests are on.
 UAT_CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')
 CHECKOUTS = os.environ.get('CLAUDE_REVIEW_CHECKOUTS', '/tmp/claude-review')
@@ -222,8 +225,11 @@ def run_claude(repository, number, sha, title, base, directory, model=''):
                *(['--model', model] if model else [])]
     # GitHub tokens stay out of Claude Code's environment.
     inherited = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
-    claude_env = dict(inherited)
-    claude_env.update(config.get('env') or {})
+    claude_env = {
+        **inherited,
+        **(config.get('env') or {}),
+        'CLAUDE_CODE_MANAGED_SETTINGS_PATH': REVIEW_MANAGED_SETTINGS,
+    }
     # A detached checkout of <sha> of its own: installing dependencies and running
     # tests leave the worker's directory alone, and the checkout is deleted after.
     # mise trusts this root (MISE_TRUSTED_CONFIG_PATHS in the Dockerfile).

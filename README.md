@@ -246,13 +246,14 @@ dsh-superagent limits its workers to a fixed list of tools (`WORK_TOOLS` in its
   the PR unmerged. It never uses `--admin`, auto-merge, or changes branch
   protection; a merge GitHub refuses is reported, not retried.
 - Claude Code runs in a temporary checkout of the reviewed commit, deleted
-  afterwards, with `--permission-mode dontAsk` and the managed policy
-  [`claude-code/managed-settings.json`](claude-code/managed-settings.json),
-  installed as `/etc/claude-code/managed-settings.json`. It may read files, run
+  afterwards, with `--permission-mode dontAsk` and the locked review managed
+  policy [`claude-code/managed-settings.review.json`](claude-code/managed-settings.review.json),
+  installed as `/etc/claude-code/managed-settings.json` and selected via
+  `CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code`. It may read files, run
   read-only `git` and inspection commands, install dependencies and run tests,
   type checks and builds (`npm`, `npx`, `node`, `pnpm`, `bun`, `mise`, `make`,
   `pytest`), and read the PR, issues and CI runs with read-only `gh`
-  subcommands. File edits, `git commit`/`push`, `gh api` and every `gh`
+  subcommands. File edits, MCP, `git commit`/`push`, `gh api` and every `gh`
   subcommand that writes are denied, and the repository's own `.claude/`
   settings, hooks and MCP servers cannot widen that. Running the PR's tests
   runs the PR's code with the agent account's credentials available, as the
@@ -606,6 +607,23 @@ Run the tests with `python3 -m unittest discover -s uat/tests -t .`; those
 that need Docker build the images and drive real DSH against a scripted model
 (`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them). CI runs them, and builds
 the superagent image, on every pull request (`.github/workflows/test.yml`).
+
+## Claude chat managed policy (prep)
+
+Interactive Claude sessions (via `scripts/claude-agent`, and the forthcoming
+`superagent-claude` plugin — see [`docs/claude-plugin.md`](docs/claude-plugin.md))
+use the chat managed policy
+[`claude-code/managed-settings.chat.json`](claude-code/managed-settings.chat.json)
+(`CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat` by default):
+Edit/Write/Agent are allowed, Bypass stays disabled, and MCP is allowlisted for
+`codebase-memory-mcp`. The image installs that binary on `PATH` (pinned
+`0.12.1`) and seeds
+[`claude-code/managed-mcp.chat.json`](claude-code/managed-mcp.chat.json) as
+`/etc/claude-code-chat/managed-mcp.json` (stdio server `codebase-memory`). The
+entrypoint best-effort indexes `$HOME/src/<repo>` into `CBM_CACHE_DIR` on the
+agent home volume; if that fails, chat can still call `index_repository` on
+first use. The PR reviewer keeps the locked review policy above (empty MCP
+allowlist, no managed-mcp seed).
 
 ## 6. Operational notes and limitations
 

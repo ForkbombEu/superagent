@@ -25,11 +25,15 @@ RUN set -eux; \
 # Upstream docs/006-deployment.md still pins dsh 0.2.1-rc.3 and the plugin
 # declares ^0.2.1-alpha.2: recheck the plugin starts when either moves.
 # Claude Code is the PR reviewer that scripts/claude-review runs.
+# codebase-memory-mcp (chat MCP only) ships a native binary next to the npm
+# package; pin matches the console branch.
 # BuildKit cache mounts keep downloaded packages on the build host between
 # deployments (even when layers are rebuilt) and out of the image/volume.
+ARG CODEBASE_MEMORY_MCP_VERSION=0.12.1
 RUN --mount=type=cache,target=/var/cache/npm \
     npm install --global --prefer-offline --cache /var/cache/npm \
-      @deepseek-ai/dsh@0.2.2-rc.5 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318
+      @deepseek-ai/dsh@0.2.2-rc.5 pnpm@11.7.0 @anthropic-ai/claude-code@2.1.318 \
+      "codebase-memory-mcp@${CODEBASE_MEMORY_MCP_VERSION}"
 
 # mise installs each target repository's toolchain from its mise.toml (see
 # prepare-worktree.sh and claude-review); the release is checked against its
@@ -49,7 +53,8 @@ RUN set -eux; \
 # apply in any directory; only the ticket directories, the repository checkout
 # and claude-review's checkouts are trusted to run config code ([env], tasks, hooks).
 ENV PATH=/home/agent/.local/share/mise/shims:$PATH \
-    MISE_TRUSTED_CONFIG_PATHS=/home/agent/.dsh/state/superagent/work:/home/agent/src:/tmp/claude-review
+    MISE_TRUSTED_CONFIG_PATHS=/home/agent/.dsh/state/superagent/work:/home/agent/src:/tmp/claude-review \
+    CBM_CACHE_DIR=/home/agent/.cache/codebase-memory-mcp
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 agent && \
     install -d -o agent -g agent /home/agent/src /home/agent/.config/gh-agent
@@ -64,10 +69,16 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
-COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
+COPY scripts/gh-agent scripts/claude-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test scripts/superagent scripts/superagent_checks.py /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/gh-agent \
+# DSH strips *_KEY/*_TOKEN from child shells; shadow npm's `claude` so every
+# invocation reloads credentials from tmpfs. claude-agent defaults chat policy;
+# claude-review pins the locked review policy path.
+RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
+ && ln -s /usr/local/bin/claude-agent /usr/local/bin/claude \
+ && chmod 0755 /usr/local/bin/gh-agent \
+    /usr/local/bin/claude-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
@@ -77,11 +88,15 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/uat-test \
     /usr/local/bin/superagent \
     /usr/local/bin/superagent_checks.py
-# Claude Code PR review: the read-only policy (managed settings take precedence over
-# user and repository settings) and the review prompt claude-review sends, and the
-# Delivery requirements that superagent-configure saves (delivery-uat.md only when
-# SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
-COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
+# Claude Code policies (managed settings take precedence over user/repo settings):
+# review stays locked (no MCP / no edits); chat allows codebase-memory MCP + Edit/Write/Agent.
+# claude-agent defaults CLAUDE_CODE_MANAGED_SETTINGS_PATH to the chat dir (settings +
+# managed-mcp.json); claude-review pins the review dir (no managed-mcp seed).
+# The review prompt and Delivery requirements follow
+# (delivery-uat.md only when SUPERAGENT_UAT_ENABLED turns user acceptance tests on).
+COPY claude-code/managed-settings.review.json /etc/claude-code/managed-settings.json
+COPY claude-code/managed-settings.chat.json /etc/claude-code-chat/managed-settings.json
+COPY claude-code/managed-mcp.chat.json /etc/claude-code-chat/managed-mcp.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
 COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/superagent/roles/
 # Deployment-owned roles file + loader: render cordis.patch.yml at image build (F6.2).

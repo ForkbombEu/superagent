@@ -11,7 +11,7 @@ import { getClaudeSessionId, setClaudeSessionId } from './sessions.js'
 
 export const PROVIDER_ID = 'superagent-claude'
 
-/** Default Claude CLI on the Superagent image (shadow or real). */
+/** Default Claude CLI on the Superagent image (npm `claude` on PATH). */
 export const DEFAULT_CLAUDE_EXECUTABLE = '/usr/local/bin/claude'
 
 /** Max characters shown for Bash activity lines (truncate long commands). */

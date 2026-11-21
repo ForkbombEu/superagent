@@ -75,16 +75,16 @@ RUN --mount=type=cache,target=/var/cache/npm \
       --prefix /opt/superagent-claude \
  && chown -R agent:agent /opt/superagent-claude
 
-COPY scripts/gh-agent scripts/claude-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
+COPY dsh/primary-workspace /opt/superagent-primary-workspace
+RUN chown -R agent:agent /opt/superagent-primary-workspace
+
+COPY scripts/gh-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test scripts/superagent scripts/superagent_checks.py /usr/local/bin/
-# DSH strips *_KEY/*_TOKEN from child shells; shadow npm's `claude` so every
-# invocation reloads credentials from tmpfs. claude-agent defaults chat policy;
-# claude-review pins the locked review policy path.
-RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
- && ln -s /usr/local/bin/claude-agent /usr/local/bin/claude \
- && chmod 0755 /usr/local/bin/gh-agent \
-    /usr/local/bin/claude-agent \
+# Leave npm's `claude` on PATH. Chat (superagent-claude Agent SDK) and
+# claude-review each pass credentials in an explicit child env from the
+# secrets file; no global PATH shadow.
+RUN chmod 0755 /usr/local/bin/gh-agent \
     /usr/local/bin/superagent-entrypoint.sh \
     /usr/local/bin/prepare-worktree.sh \
     /usr/local/bin/superagent-configure \
@@ -97,7 +97,7 @@ RUN mv /usr/local/bin/claude /usr/local/bin/claude.real \
 # Claude Code policies (managed settings take precedence over user/repo settings):
 # review stays locked (no MCP tool allow rules / no edits); chat allows
 # codebase-memory MCP + Edit/Write/Agent/Task.
-# claude-agent defaults CLAUDE_CODE_MANAGED_SETTINGS_PATH to the chat dir;
+# superagent-claude sets CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat;
 # claude-review pins /etc/claude-code (review settings) and stays dontAsk.
 # Claude Code 2.1.318 loads enterprise managed-mcp.json only from
 # /etc/claude-code/ (not from CLAUDE_CODE_MANAGED_SETTINGS_PATH). Seed the same
@@ -131,6 +131,7 @@ RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
     dsh plugin --profile superagent add 'link:/opt/superagent-claude'; \
+    dsh plugin --profile superagent add 'link:/opt/superagent-primary-workspace'; \
     mkdir -p "$DSH_HOME/state/superagent"; \
     cp /usr/local/share/superagent/profile.patch.yml \
       "$DSH_HOME/profiles/superagent/cordis.patch.yml"

@@ -608,25 +608,40 @@ that need Docker build the images and drive real DSH against a scripted model
 (`SUPERAGENT_UAT_SKIP_DOCKER_TESTS=1` skips them). CI runs them, and builds
 the superagent image, on every pull request (`.github/workflows/test.yml`).
 
-## Claude chat managed policy (prep)
+## Claude in DSH (`superagent-claude`)
 
-Interactive Claude sessions (via the `superagent-claude` plugin — see
-[`docs/claude-plugin.md`](docs/claude-plugin.md); `scripts/claude-agent` remains
-for legacy paths) use the chat managed policy
+The image installs the in-tree [`dsh/claude`](dsh/claude) plugin
+(`superagent-claude`) so you can chat with Claude Code in the DSH UI (Agent
+Preset **Claude (Superagent)**). One DSH step is one Claude Code turn via the
+Agent SDK; Claude keeps its own tools, MCP servers and subagents. New sessions
+default to the git checkout at `$HOME/src/<repo>` from `GITHUB_REPOSITORY`
+(host plugin [`dsh/primary-workspace`](dsh/primary-workspace), promote-only —
+it never deletes other workspace registrations).
+
+**Credentials.** The entrypoint writes `ANTHROPIC_API_KEY` /
+`CLAUDE_CODE_OAUTH_TOKEN` into `/run/superagent-secrets/claude-review.json`
+and unsets them from the DSH process. Chat and `claude-review` each pass those
+values only in the Claude child `env`. npm's `claude` stays on `PATH` with no
+credential-reloading shadow.
+
+**Permission model (chat).** Managed policy
 [`claude-code/managed-settings.chat.json`](claude-code/managed-settings.chat.json)
-(`CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat` by default):
-Edit/Write/Agent are allowed, Bypass stays disabled, and MCP is allowlisted for
-`codebase-memory-mcp`. The image installs that binary on `PATH` (pinned
-`0.12.1`) and seeds
+(`CLAUDE_CODE_MANAGED_SETTINGS_PATH=/etc/claude-code-chat`): Edit/Write/Agent
+are allowed, Bypass stays disabled
+(`permissions.disableBypassPermissionsMode: disable`), and MCP is allowlisted
+for `codebase-memory-mcp`. Chat runs `permissionMode: 'default'` with a DSH
+approval bridge (`canUseTool`) that auto-allows the managed allow list, honors
+deny, and prompts for everything else. Plan mode is the model alias
+`opusplan` (`permissionMode: 'plan'`).
+
+The image installs `codebase-memory-mcp` on `PATH` (pinned `0.12.1`) and seeds
 [`claude-code/managed-mcp.chat.json`](claude-code/managed-mcp.chat.json) as
 both `/etc/claude-code-chat/managed-mcp.json` and `/etc/claude-code/managed-mcp.json`
 (Claude Code 2.1.318 loads enterprise MCP only from the latter). The plugin also
-registers that server through the Agent SDK `mcpServers` option. Chat runs
-`permissionMode: 'default'` with a DSH approval bridge (`canUseTool`) that
-auto-allows the managed allow list, honors deny, and prompts for everything
-else. The PR reviewer keeps the locked review policy above (`dontAsk`, empty
-MCP allowlist / no `mcp__*` allow rules), so the shared enterprise MCP seed
-cannot execute under review even though the file is present for chat.
+registers that server through the Agent SDK `mcpServers` option. The PR
+reviewer keeps the locked review policy above (`dontAsk`, empty MCP allowlist /
+no `mcp__*` allow rules), so the shared enterprise MCP seed cannot execute
+under review even though the file is present for chat.
 
 ## 6. Operational notes and limitations
 

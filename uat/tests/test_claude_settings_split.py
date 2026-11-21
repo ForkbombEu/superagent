@@ -2,14 +2,9 @@
 import json
 import os
 import re
-import stat
-import subprocess
-import tempfile
-import textwrap
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CLAUDE_AGENT = os.path.join(ROOT, 'scripts', 'claude-agent')
 CLAUDE_REVIEW = os.path.join(ROOT, 'scripts', 'claude-review')
 ENTRYPOINT = os.path.join(ROOT, 'scripts', 'superagent-entrypoint.sh')
 DOCKERFILE = os.path.join(ROOT, 'Dockerfile')
@@ -70,6 +65,21 @@ class ClaudeSettingsSplit(unittest.TestCase):
         )
         self.assertIn('CBM_CACHE_DIR=/home/agent/.cache/codebase-memory-mcp', dockerfile)
 
+    def test_dockerfile_leaves_npm_claude_unshadowed(self):
+        with open(DOCKERFILE, encoding='utf-8') as file:
+            dockerfile = file.read()
+        self.assertNotIn('claude-agent', dockerfile)
+        self.assertNotIn('claude.real', dockerfile)
+        self.assertNotIn('ln -s /usr/local/bin/claude-agent', dockerfile)
+        self.assertIn("dsh plugin --profile superagent add 'link:/opt/superagent-primary-workspace'", dockerfile)
+        self.assertIn('COPY dsh/primary-workspace /opt/superagent-primary-workspace', dockerfile)
+
+    def test_entrypoint_unsets_claude_credentials(self):
+        with open(ENTRYPOINT, encoding='utf-8') as file:
+            source = file.read()
+        self.assertIn('unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN', source)
+        self.assertIn('/run/superagent-secrets/claude-review.json', source)
+
     def test_entrypoint_indexes_live_checkout_best_effort(self):
         with open(ENTRYPOINT, encoding='utf-8') as file:
             source = file.read()
@@ -78,33 +88,6 @@ class ClaudeSettingsSplit(unittest.TestCase):
         self.assertIn('repo_checkout', source)
         self.assertNotIn('/opt/console-repo', source)
         self.assertRegex(source, re.compile(r'best-effort|index on first use', re.I))
-
-    def test_claude_agent_defaults_to_chat_policy_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            secrets = os.path.join(tmp, 'claude-review.json')
-            with open(secrets, 'w', encoding='utf-8') as file:
-                json.dump({'env': {'CLAUDE_CODE_OAUTH_TOKEN': 'test-token'}}, file)
-            real = os.path.join(tmp, 'claude.real')
-            with open(real, 'w', encoding='utf-8') as file:
-                file.write(textwrap.dedent('''\
-                    #!/bin/sh
-                    printf '%s\\n' "${CLAUDE_CODE_MANAGED_SETTINGS_PATH-}"
-                    '''))
-            os.chmod(real, os.stat(real).st_mode | stat.S_IXUSR)
-            agent = os.path.join(tmp, 'claude-agent')
-            with open(CLAUDE_AGENT, encoding='utf-8') as source, open(agent, 'w', encoding='utf-8') as dest:
-                dest.write(source.read().replace('/run/superagent-secrets/claude-review.json', secrets)
-                           .replace('/usr/local/bin/claude.real', real))
-            os.chmod(agent, os.stat(agent).st_mode | stat.S_IXUSR)
-            env = {name: value for name, value in os.environ.items()
-                   if name != 'CLAUDE_CODE_MANAGED_SETTINGS_PATH'}
-            out = subprocess.run([agent], capture_output=True, text=True, check=True, env=env)
-            self.assertEqual(out.stdout.strip(), '/etc/claude-code-chat')
-            out = subprocess.run(
-                [agent], capture_output=True, text=True, check=True,
-                env={**env, 'CLAUDE_CODE_MANAGED_SETTINGS_PATH': '/etc/claude-code'},
-            )
-            self.assertEqual(out.stdout.strip(), '/etc/claude-code')
 
     def test_claude_review_pins_review_policy_constant(self):
         with open(CLAUDE_REVIEW, encoding='utf-8') as file:

@@ -39,7 +39,7 @@ PROMPT = os.environ.get('CLAUDE_REVIEW_PROMPT', '/usr/local/share/superagent/rev
 # which DSH strips from worker shells as it does every *_TOKEN/*_KEY variable.
 CONFIG = os.environ.get('CLAUDE_REVIEW_CONFIG', '/run/superagent-secrets/claude-review.json')
 # Locked review policy (no MCP, no Edit/Write). Interactive chat uses
-# /etc/claude-code-chat via claude-agent when this env is unset.
+# /etc/claude-code-chat via the superagent-claude plugin's explicit env.
 REVIEW_MANAGED_SETTINGS = '/etc/claude-code'
 # Written by superagent-entrypoint.sh when user acceptance tests are on.
 UAT_CONFIG = os.environ.get('UAT_TEST_CONFIG', '/run/superagent-secrets/uat.json')

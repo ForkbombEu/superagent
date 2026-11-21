@@ -295,6 +295,8 @@ a backlog, ask any coding agent to read that `AGENTS.md` and
 
 Copy [`templates/.agents/skills/`](templates/.agents/skills/) into the target
 repository as `.agents/skills/` so a local agent can load the planning skills.
+[`architect`](templates/.agents/skills/architect/SKILL.md) builds a module map
+(with codebase-memory-mcp code-graph queries when available) and records ADRs;
 [`write-issues`](templates/.agents/skills/write-issues/SKILL.md) splits a
 specification into issues that carry Effort, `Depends on` and optional UAT;
 run `python templates/.agents/skills/write-issues/check-fixtures.py` in this

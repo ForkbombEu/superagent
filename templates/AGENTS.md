@@ -97,6 +97,13 @@ Every issue:
 
 Opening a backlog:
 
+When mapping modules, querying the code graph, or recording ADRs before a
+backlog, follow
+[`.agents/skills/architect/SKILL.md`](.agents/skills/architect/SKILL.md).
+When splitting a specification or plan into issues, follow
+[`.agents/skills/write-issues/SKILL.md`](.agents/skills/write-issues/SKILL.md)
+(Effort, Model, Context, Branch after, Depends on, UAT).
+
 1. Break the work into issues as above and order them so each one's
    prerequisites come before it; there must be no cycles.
 2. Make the first issue set up `mise.toml` with the toolchain, the build, the
@@ -115,6 +122,11 @@ Issue template:
 @forkboteu <one paragraph: what to build and why, referring to the relevant
 sections of docs/specification.md>
 
+- Effort :: ~100k
+- Model :: mid
+- Context :: path/a, path/b
+- Branch after :: consistent
+
 ## Acceptance criteria
 - [ ] <verifiable behavior>
 - [ ] <tests that cover it>
@@ -129,6 +141,11 @@ Then <what they observe>
 
 Depends on #<a>, #<b>
 ```
+
+`Effort`, `Model`, `Context` and `Branch after` size the issue for the
+implementer (see the write-issues skill). `Branch after` is `consistent` when
+the branch works after the issue, or `inconsistent` naming what is still
+missing.
 
 The title is a short imperative summary, such as
 `Add the rulebook import endpoint`; the agent writes the conventional pull

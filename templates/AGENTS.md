@@ -97,6 +97,9 @@ Every issue:
 
 Opening a backlog:
 
+When mapping modules, querying the code graph, or recording ADRs before a
+backlog, follow
+[`.agents/skills/architect/SKILL.md`](.agents/skills/architect/SKILL.md).
 When splitting a specification or plan into issues, follow
 [`.agents/skills/write-issues/SKILL.md`](.agents/skills/write-issues/SKILL.md)
 (Effort, Model, Context, Branch after, Depends on, UAT).

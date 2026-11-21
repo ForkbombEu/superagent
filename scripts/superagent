@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""superagent check/merge/init: PR gates, or scaffold a target repository.
+"""superagent check/merge/init/upgrade: PR gates, or scaffold a target repository.
 
 `check` resolves repository, PR and head, then either prints the plan
 (`--dry-run`) or runs the next missing check under a per-PR lock.
@@ -7,6 +7,8 @@
 squash-merges with `--match-head-commit` (or `--dry-run` reports only).
 `init` copies target-owned templates (AGENTS.md, UAT config, planning skills)
 into a caller-chosen directory.
+`upgrade` refreshes planning skills from the same templates and writes
+`.superagent/UPGRADE.md` as a human/agent work order of what changed.
 """
 import fcntl
 import json
@@ -473,6 +475,126 @@ def parse_init_args(args):
     return positional[0], force
 
 
+def upgrade_plan(root):
+    """Return (src, dest_rel) pairs for skills refresh under template root."""
+    pairs = []
+    for rel in INIT_TREES:
+        src = os.path.join(root, rel)
+        if not os.path.isdir(src):
+            fail(f'template missing: {rel}')
+        for dirpath, _dirnames, filenames in os.walk(src):
+            for name in filenames:
+                full = os.path.join(dirpath, name)
+                pairs.append((full, os.path.relpath(full, root)))
+    return pairs
+
+
+def parse_upgrade_args(args):
+    positional = []
+    for arg in args:
+        if arg.startswith('-'):
+            fail(f'usage: {CHECK} upgrade <dir>')
+        positional.append(arg)
+    if len(positional) != 1:
+        fail(f'usage: {CHECK} upgrade <dir>')
+    return positional[0]
+
+
+def _file_digest(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path, 'rb') as file:
+        return file.read()
+
+
+def classify_upgrade(target, pairs):
+    """Compare target paths to templates before copy: added / updated / unchanged."""
+    added, updated, unchanged = [], [], []
+    for src, rel in pairs:
+        dest = os.path.join(target, rel)
+        before = _file_digest(dest)
+        after = _file_digest(src)
+        if before is None:
+            added.append(rel)
+        elif before != after:
+            updated.append(rel)
+        else:
+            unchanged.append(rel)
+    return added, updated, unchanged
+
+
+def write_upgrade_work_order(target, added, updated, unchanged):
+    """Write .superagent/UPGRADE.md as a human/agent work order of what changed."""
+    path = os.path.join(target, '.superagent', 'UPGRADE.md')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = [
+        '# Superagent upgrade',
+        '',
+        'Work order from `superagent upgrade`. Planning skills under',
+        '`.agents/skills/` were refreshed from the deployment templates.',
+        '`AGENTS.md` and `.superagent/uat.yaml` were left untouched.',
+        '',
+        '## Changed',
+        '',
+    ]
+    if not added and not updated:
+        lines.append('- No skill file content changed (already matched templates).')
+        lines.append('')
+    else:
+        if added:
+            lines.append('### Added')
+            lines.append('')
+            for rel in added:
+                lines.append(f'- `{rel}`')
+            lines.append('')
+        if updated:
+            lines.append('### Updated')
+            lines.append('')
+            for rel in updated:
+                lines.append(f'- `{rel}` refreshed from templates')
+            lines.append('')
+    if unchanged:
+        lines.append('### Unchanged')
+        lines.append('')
+        lines.append(f'- {len(unchanged)} skill file(s) already matched templates')
+        lines.append('')
+    lines.extend([
+        '## Steps',
+        '',
+        '1. **Review** every Added/Updated path under `.agents/skills/`.',
+        '   Done when: you have read each listed file (or confirmed the diff).',
+        '2. **Apply** any new planning guidance this repository needs',
+        '   (issue format, ADRs, UAT sections). Done when: follow-up edits',
+        '   are staged or an issue tracks them.',
+        '3. **Commit** the refreshed skills and this work order together.',
+        '   Done when: `git status` is clean for `.agents/skills/` and',
+        '   `.superagent/UPGRADE.md`.',
+        '',
+    ])
+    with open(path, 'w', encoding='utf-8') as file:
+        file.write('\n'.join(lines))
+
+
+def run_upgrade(target):
+    if not target:
+        fail(f'usage: {CHECK} upgrade <dir>')
+    target = os.path.abspath(target)
+    if not os.path.isdir(target):
+        fail(f'target is not a directory: {target}')
+    root = template_root()
+    pairs = upgrade_plan(root)
+    added, updated, unchanged = classify_upgrade(target, pairs)
+    for src, rel in pairs:
+        dest = os.path.join(target, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(src, dest)
+    write_upgrade_work_order(target, added, updated, unchanged)
+    print(
+        f'{CHECK} upgrade: refreshed {len(pairs)} skill file(s) in {target}; '
+        f'wrote .superagent/UPGRADE.md'
+    )
+
+
 def main(args):
     if args == ['check', '--dry-run']:
         dry_run()
@@ -486,8 +608,12 @@ def main(args):
         target, force = parse_init_args(args[1:])
         run_init(target, force=force)
         sys.exit(checks.Exit.PASS)
+    if args and args[0] == 'upgrade':
+        target = parse_upgrade_args(args[1:])
+        run_upgrade(target)
+        sys.exit(checks.Exit.PASS)
     fail(
-        f'usage: {CHECK} check [--dry-run] | merge [--dry-run] | init <dir> [--force]',
+        f'usage: {CHECK} check [--dry-run] | merge [--dry-run] | init <dir> [--force] | upgrade <dir>',
         checks.Exit.PRECONDITION,
     )
 

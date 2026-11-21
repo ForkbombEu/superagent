@@ -1,0 +1,713 @@
+"""Load and resolve deployment-owned superagent.yaml.
+
+Validates against superagent.schema.json, resolves Role tiers into concrete
+models, then applies environment overrides (env wins). Callers must pass an
+absolute path under the deployment or image — never a pull-request checkout.
+
+Also renders the DSH profile patch at image build (`render-profile` CLI / 
+`render_profile_patch`).
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+import jsonschema
+import yaml
+
+DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+# Repo layout: scripts/superagent_config.py → repo root. Image layout: script
+# sits next to superagent.yaml / superagent.schema.json under share/superagent.
+ROOT = (
+    DIRECTORY
+    if os.path.isfile(os.path.join(DIRECTORY, 'superagent.schema.json'))
+    else os.path.dirname(DIRECTORY)
+)
+SCHEMA_PATH = os.path.join(ROOT, 'superagent.schema.json')
+DEPLOYMENT_CONFIG_PATH = '/usr/local/share/superagent/superagent.yaml'
+
+
+class ValidationError(Exception):
+    """The file or environment overrides are not a valid configuration."""
+
+
+@dataclass
+class ResolvedConfig:
+    """Concrete models and role surfaces after tier resolution and env overrides."""
+
+    version: int
+    tiers: dict[str, dict[str, Any]]
+    roles: dict[str, dict[str, Any]]
+    executor: dict[str, str] | None = None
+    reviewer: dict[str, Any] = field(default_factory=dict)
+    uat: dict[str, str] | None = None
+    tier_routes: list[dict[str, str]] = field(default_factory=list)
+
+
+def _schema() -> dict:
+    with open(SCHEMA_PATH, encoding='utf-8') as file:
+        return json.load(file)
+
+
+def _require_absolute_deployment_path(path: str) -> str:
+    if not os.path.isabs(path):
+        raise ValidationError(
+            f'superagent config path must be absolute (deployment/image), got {path!r}'
+        )
+    return path
+
+
+def _load_yaml(path: str) -> Any:
+    try:
+        with open(path, encoding='utf-8') as file:
+            return yaml.safe_load(file)
+    except OSError as error:
+        raise ValidationError(f'cannot read {path}: {error}') from error
+    except yaml.YAMLError as error:
+        raise ValidationError(f'invalid YAML in {path}: {error}') from error
+
+
+def _validate_document(document: Any) -> dict:
+    if not isinstance(document, dict):
+        raise ValidationError('superagent.yaml must be a mapping')
+    try:
+        jsonschema.validate(document, _schema())
+    except jsonschema.ValidationError as error:
+        where = '/'.join(str(part) for part in error.absolute_path) or '(root)'
+        raise ValidationError(f'{where}: {error.message}') from error
+    return document
+
+
+def _dsh_dict(tier: Mapping[str, Any]) -> dict[str, str] | None:
+    dsh = tier.get('dsh')
+    if not dsh:
+        return None
+    out = {'provider': dsh['provider'], 'model': dsh['model']}
+    if dsh.get('reasoningEffort'):
+        out['reasoningEffort'] = dsh['reasoningEffort']
+    return out
+
+
+def _resolve_tiers(raw_tiers: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    resolved: dict[str, dict[str, Any]] = {}
+    for name, tier in raw_tiers.items():
+        entry: dict[str, Any] = {}
+        if 'claude' in tier:
+            entry['claude'] = tier['claude']
+        dsh = _dsh_dict(tier)
+        if dsh:
+            entry['dsh'] = dsh
+        resolved[name] = entry
+    return resolved
+
+
+def _tier_or_raise(tiers: Mapping[str, Any], name: str, where: str) -> dict[str, Any]:
+    if name not in tiers:
+        raise ValidationError(f'{where}: unknown tier {name!r}')
+    return tiers[name]
+
+
+def _resolve_roles(raw_roles: Mapping[str, Any], tiers: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    roles: dict[str, dict[str, Any]] = {}
+    for name, role in raw_roles.items():
+        tier_name = role['tier']
+        tier = _tier_or_raise(tiers, tier_name, f'roles.{name}')
+        resolved: dict[str, Any] = {
+            'runtime': role['runtime'],
+            'tier': tier_name,
+        }
+        if 'instructions' in role:
+            resolved['instructions'] = role['instructions']
+        if 'sources' in role:
+            resolved['sources'] = list(role['sources'])
+
+        if role['runtime'] in ('dsh-worker', 'dsh-headless'):
+            dsh = tier.get('dsh')
+            if not dsh:
+                raise ValidationError(f'roles.{name}: tier {tier_name!r} has no dsh model')
+            resolved['model'] = copy.deepcopy(dsh)
+        elif role['runtime'] == 'claude-code':
+            claude = tier.get('claude')
+            if not claude:
+                raise ValidationError(f'roles.{name}: tier {tier_name!r} has no claude model')
+            resolved['model'] = claude
+
+        if 'route' in role:
+            route = role['route']
+            route_tier = _tier_or_raise(tiers, route['tier'], f'roles.{name}.route')
+            claude = route_tier.get('claude')
+            if not claude:
+                raise ValidationError(
+                    f'roles.{name}.route: tier {route["tier"]!r} has no claude model'
+                )
+            resolved['route'] = {
+                'tier': route['tier'],
+                'model': claude,
+                'when': copy.deepcopy(route['when']),
+            }
+
+        if 'subagents' in role:
+            subagents = {}
+            for sub_name, sub in role['subagents'].items():
+                sub_tier = _tier_or_raise(tiers, sub['tier'], f'roles.{name}.subagents.{sub_name}')
+                dsh = sub_tier.get('dsh')
+                if not dsh:
+                    raise ValidationError(
+                        f'roles.{name}.subagents.{sub_name}: tier {sub["tier"]!r} has no dsh model'
+                    )
+                subagents[sub_name] = {
+                    'tier': sub['tier'],
+                    'instructions': sub['instructions'],
+                    'model': copy.deepcopy(dsh),
+                }
+            resolved['subagents'] = subagents
+
+        roles[name] = resolved
+    return roles
+
+
+def _tier_routes(tiers: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Host allowedModels routes from low then mid, collapsing duplicates."""
+    routes, seen = [], set()
+    for name in ('low', 'mid'):
+        dsh = (tiers.get(name) or {}).get('dsh')
+        if not dsh:
+            continue
+        key = f"{dsh['provider']}\0{dsh['model']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        routes.append({'provider': dsh['provider'], 'model': dsh['model']})
+    return routes
+
+
+def _surfaces(roles: Mapping[str, Any], tiers: Mapping[str, Any]) -> tuple:
+    executor = None
+    implementer = roles.get('implementer')
+    if implementer and implementer.get('model'):
+        executor = copy.deepcopy(implementer['model'])
+
+    reviewer: dict[str, Any] = {}
+    review_role = roles.get('reviewer')
+    if review_role:
+        if 'model' in review_role:
+            reviewer['model'] = review_role['model']
+        route = review_role.get('route')
+        if route:
+            reviewer['small_model'] = route['model']
+            reviewer['small_diff_lines'] = route['when']['diff_lines_below']
+
+    uat = None
+    uat_role = roles.get('uat-tester')
+    if uat_role and uat_role.get('model'):
+        uat = copy.deepcopy(uat_role['model'])
+
+    return executor, reviewer, uat, _tier_routes(tiers)
+
+
+def _env(environ: Mapping[str, str], key: str) -> str:
+    return (environ.get(key) or '').strip()
+
+
+def _apply_dsh_env(
+    environ: Mapping[str, str],
+    provider_key: str,
+    model_key: str,
+    effort_key: str,
+    label: str,
+) -> dict[str, str] | None:
+    provider = _env(environ, provider_key)
+    model = _env(environ, model_key)
+    effort = _env(environ, effort_key)
+    if not (provider or model or effort):
+        return None
+    if not (provider and model):
+        raise ValidationError(f'set both {provider_key} and {model_key} ({label})')
+    out = {'provider': provider, 'model': model}
+    if effort:
+        out['reasoningEffort'] = effort
+    return out
+
+
+def _rewrite_subagents(roles: Mapping[str, Any], tier_name: str, model: dict[str, str]) -> None:
+    for role in roles.values():
+        for sub in (role.get('subagents') or {}).values():
+            if sub.get('tier') == tier_name:
+                sub['model'] = copy.deepcopy(model)
+
+
+def _apply_env(resolved: ResolvedConfig, environ: Mapping[str, str]) -> None:
+    executor_override = _apply_dsh_env(
+        environ,
+        'SUPERAGENT_EXECUTOR_PROVIDER',
+        'SUPERAGENT_EXECUTOR_MODEL',
+        'SUPERAGENT_EXECUTOR_REASONING_EFFORT',
+        'executor',
+    )
+    if executor_override is not None:
+        resolved.executor = executor_override
+        if 'implementer' in resolved.roles:
+            resolved.roles['implementer']['model'] = copy.deepcopy(executor_override)
+
+    low = _apply_dsh_env(
+        environ,
+        'SUPERAGENT_TIER_LOW_PROVIDER',
+        'SUPERAGENT_TIER_LOW_MODEL',
+        'SUPERAGENT_TIER_LOW_REASONING_EFFORT',
+        'tier low',
+    )
+    if low is not None:
+        resolved.tiers.setdefault('low', {})['dsh'] = low
+        _rewrite_subagents(resolved.roles, 'low', low)
+
+    mid = _apply_dsh_env(
+        environ,
+        'SUPERAGENT_TIER_MID_PROVIDER',
+        'SUPERAGENT_TIER_MID_MODEL',
+        'SUPERAGENT_TIER_MID_REASONING_EFFORT',
+        'tier mid',
+    )
+    if mid is not None:
+        resolved.tiers.setdefault('mid', {})['dsh'] = mid
+        _rewrite_subagents(resolved.roles, 'mid', mid)
+        for name, role in resolved.roles.items():
+            if role.get('tier') != 'mid' or role.get('runtime') not in ('dsh-worker', 'dsh-headless'):
+                continue
+            if name == 'implementer' and executor_override is not None:
+                continue
+            role['model'] = copy.deepcopy(mid)
+        uat_env_set = bool(
+            _env(environ, 'SUPERAGENT_UAT_PROVIDER')
+            or _env(environ, 'SUPERAGENT_UAT_MODEL')
+            or _env(environ, 'SUPERAGENT_UAT_REASONING_EFFORT')
+        )
+        if not uat_env_set and resolved.roles.get('uat-tester', {}).get('tier') == 'mid':
+            resolved.roles['uat-tester']['model'] = copy.deepcopy(mid)
+            resolved.uat = copy.deepcopy(mid)
+
+    reviewer_model = _env(environ, 'SUPERAGENT_REVIEWER_MODEL')
+    if reviewer_model:
+        resolved.reviewer['model'] = reviewer_model
+        if 'reviewer' in resolved.roles:
+            resolved.roles['reviewer']['model'] = reviewer_model
+
+    effort = _env(environ, 'SUPERAGENT_REVIEWER_EFFORT')
+    if effort:
+        if effort not in {'low', 'medium', 'high', 'xhigh', 'max'}:
+            raise ValidationError(
+                'SUPERAGENT_REVIEWER_EFFORT must be low, medium, high, xhigh or max'
+            )
+        resolved.reviewer['effort'] = effort
+
+    small = _env(environ, 'SUPERAGENT_REVIEWER_SMALL_MODEL')
+    if small:
+        resolved.reviewer['small_model'] = small
+        if 'reviewer' in resolved.roles and 'route' in resolved.roles['reviewer']:
+            resolved.roles['reviewer']['route']['model'] = small
+
+    threshold = _env(environ, 'SUPERAGENT_REVIEWER_SMALL_DIFF_LINES')
+    if threshold:
+        if not threshold.isdigit() or int(threshold) < 1:
+            raise ValidationError('SUPERAGENT_REVIEWER_SMALL_DIFF_LINES must be a positive integer')
+        value = int(threshold)
+        resolved.reviewer['small_diff_lines'] = value
+        if 'reviewer' in resolved.roles and 'route' in resolved.roles['reviewer']:
+            resolved.roles['reviewer']['route']['when']['diff_lines_below'] = value
+
+    uat = _apply_dsh_env(
+        environ,
+        'SUPERAGENT_UAT_PROVIDER',
+        'SUPERAGENT_UAT_MODEL',
+        'SUPERAGENT_UAT_REASONING_EFFORT',
+        'uat',
+    )
+    if uat is not None:
+        resolved.uat = uat
+        if 'uat-tester' in resolved.roles:
+            resolved.roles['uat-tester']['model'] = copy.deepcopy(uat)
+
+    resolved.tier_routes = _tier_routes(resolved.tiers)
+
+
+def load(path: str, environ: Mapping[str, str] | None = None) -> ResolvedConfig:
+    """Load `path`, validate, resolve tiers, apply `environ` overrides (env wins)."""
+    path = _require_absolute_deployment_path(path)
+    document = _validate_document(_load_yaml(path))
+    tiers = _resolve_tiers(document['tiers'])
+    for role_name, role in document['roles'].items():
+        _tier_or_raise(tiers, role['tier'], f'roles.{role_name}')
+        if 'route' in role:
+            _tier_or_raise(tiers, role['route']['tier'], f'roles.{role_name}.route')
+        for sub_name, sub in (role.get('subagents') or {}).items():
+            _tier_or_raise(tiers, sub['tier'], f'roles.{role_name}.subagents.{sub_name}')
+
+    roles = _resolve_roles(document['roles'], tiers)
+    executor, reviewer, uat, routes = _surfaces(roles, tiers)
+    resolved = ResolvedConfig(
+        version=document['version'],
+        tiers=tiers,
+        roles=roles,
+        executor=executor,
+        reviewer=reviewer,
+        uat=uat,
+        tier_routes=routes,
+    )
+    _apply_env(resolved, environ if environ is not None else os.environ)
+    return resolved
+
+
+def uat_environ(resolved: ResolvedConfig) -> dict[str, str]:
+    """Environment for uat-gate / the tester from the resolved UAT surface."""
+    if not resolved.uat:
+        return {}
+    out = {
+        'SUPERAGENT_UAT_PROVIDER': resolved.uat['provider'],
+        'SUPERAGENT_UAT_MODEL': resolved.uat['model'],
+    }
+    if resolved.uat.get('reasoningEffort'):
+        out['SUPERAGENT_UAT_REASONING_EFFORT'] = resolved.uat['reasoningEffort']
+    return out
+
+
+# --- Profile patch rendering (F6.2, image build) ---------------------------------
+
+ROLES_IMAGE_DIR = '/usr/local/share/superagent/roles'
+
+# Known role presets: description and whether the filesystem tools are read-only.
+# Unknown subagent names fall back to a generic writable preset.
+_ROLE_PRESET_META = {
+    'explorer': {
+        'description': (
+            'Map the repository; read and search only. '
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': True,
+    },
+    'frontend': {
+        'description': (
+            "Ship UI changes in this repository's frontend stack. "
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': False,
+    },
+    'devops': {
+        'description': (
+            'Change build, run, and ship paths — not product features. '
+            'For worker subagents, not manual selection.'
+        ),
+        'read_only': False,
+    },
+}
+
+# Stable allowlist / insert order for today's roles (then any extras, sorted).
+_PREFERRED_SUBAGENT_ORDER = ('explorer', 'frontend', 'devops')
+
+
+def _ordered_subagent_names(subagents: Mapping[str, Any]) -> list[str]:
+    names = set(subagents)
+    ordered = [name for name in _PREFERRED_SUBAGENT_ORDER if name in names]
+    ordered.extend(sorted(names - set(ordered)))
+    return ordered
+
+
+def _persona_image_path(instructions: str) -> str:
+    return f'{ROLES_IMAGE_DIR}/{os.path.basename(instructions)}'
+
+
+def _render_host_model_routes(routes: list[dict[str, str]]) -> str:
+    enabled = 'true' if routes else 'false'
+    if not routes:
+        models = '[]'
+    else:
+        lines = []
+        for route in routes:
+            lines.append(f"      - provider: {route['provider']}")
+            lines.append(f"        model: {route['model']}")
+        models = '\n' + '\n'.join(lines)
+    return f"""# Host authorization for explicit child model routes (ADR § Subagent model routes).
+# enabled + allowedModels come from superagent.yaml tiers (build) and are
+# re-applied at start with SUPERAGENT_TIER_* env overrides (entrypoint --apply-env).
+- id: subagent-model-selection-settings
+  name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+  config:
+    enabled: {enabled}
+    allowedModels:{models if routes else ' []'}"""
+
+
+def _render_allowlist(names: list[str]) -> str:
+    items = ['standard', *names]
+    return '\n'.join(f'                - {item}' for item in items)
+
+
+def _render_worker_preset(allowlist: str) -> str:
+    return f"""# Full restatement of the plugin's worker preset with allowedAgentPresets on the
+# nested tool-subagent (Host top-level tool-subagent is a different row).
+- id: dsh-superagent-worker-preset
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: dsh-superagent-worker
+    name: dsh-superagent 执行器
+    description: dsh-superagent 的执行器 Session 专用，不供手动选择。前台命令超 5 秒转入后台，只含执行工作所需的工具。
+    order: 90
+    plugins:
+      - id: persona
+        name: '@deepseek-ai/dsh-persona'
+        config:
+          prefix: You are a coding agent powered by the {{{{model}}}} model.
+      - id: agent-instructions
+        name: '@deepseek-ai/dsh-agent-instructions'
+        config:
+          maxBytes: 65536
+      - id: time-context
+        name: '@deepseek-ai/dsh-time-context'
+      # A foreground command waits at most 5 s, then the shell tool moves it to a background job.
+      - id: shell
+        name: cordis:group
+        group: true
+        isolate:
+          shell: true
+        config:
+          - id: bash-sandbox
+            name: '@deepseek-ai/dsh-bash-sandbox'
+            disabled: !!js process.platform === 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: pwsh-sandbox
+            name: '@deepseek-ai/dsh-pwsh-sandbox'
+            disabled: !!js process.platform !== 'win32'
+            config:
+              timeoutMs: 5000
+              maxTimeoutMs: 5000
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
+      - id: tool-jobs
+        name: '@deepseek-ai/dsh-tool-jobs'
+        config:
+          waitTimeoutMs: 5000
+          maxWaitTimeoutMs: 5000
+      - id: skill-filesystem
+        name: '@deepseek-ai/dsh-skill-filesystem'
+      - id: tool-skill
+        name: '@deepseek-ai/dsh-tool-skill'
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+            config:
+              thresholdChars: 8192
+              headChars: 4096
+              tailChars: 1024
+      - id: delegation
+        name: cordis:group
+        group: true
+        isolate:
+          workflowEngine: true
+        config:
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+          - id: tool-subagent
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: spawn
+              toolName: subagent
+              modelSelection: true
+              modelDiscovery: true
+              agentPreset: standard
+              allowedAgentPresets:
+{allowlist}
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: tool-web
+        name: '@deepseek-ai/dsh-tool-web'
+        config:
+          fetch: false
+          searchTimeoutMs: 60000"""
+
+
+def _render_fs_plugin(read_only: bool) -> str:
+    if read_only:
+        return """          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+              applyPatch: false"""
+    return """          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false"""
+
+
+def _render_role_preset(name: str, instructions: str, order: int) -> str:
+    meta = _ROLE_PRESET_META.get(name) or {
+        'description': f'{name} role preset. For worker subagents, not manual selection.',
+        'read_only': False,
+    }
+    persona = _persona_image_path(instructions)
+    description = meta['description']
+    fs_plugin = _render_fs_plugin(bool(meta['read_only']))
+    return f"""    - id: {name}-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: {name}
+        name: {name}
+        description: {description}
+        order: {order}
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: !!js process.getBuiltinModule('node:fs').readFileSync('{persona}', 'utf8')
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+{fs_plugin}
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000"""
+
+
+def render_profile_patch(config: ResolvedConfig) -> str:
+    """Render the Superagent DSH profile patch (cordis.patch.yml text).
+
+    Presets, the worker allowlist, and Host model routes come from `config`
+    (loaded from superagent.yaml). Webserver, stateDir, and the worker preset
+    restatement stay deployment constants. Persona files are read at DSH load
+    from ROLES_IMAGE_DIR via !!js.
+    """
+    implementer = config.roles.get('implementer') or {}
+    subagents = implementer.get('subagents') or {}
+    names = _ordered_subagent_names(subagents)
+    allowlist = _render_allowlist(names)
+    routes = list(config.tier_routes)
+
+    role_blocks = []
+    for index, name in enumerate(names):
+        instructions = subagents[name]['instructions']
+        role_blocks.append(_render_role_preset(name, instructions, order=100 + index))
+
+    insert = '- insert:\n' + '\n'.join(role_blocks) if role_blocks else ''
+
+    parts = [
+        '# Superagent profile: loopback webserver, stateDir, worker subagent allowlist,',
+        '# role presets, and Host model-selection routes — generated from superagent.yaml',
+        '# at image build (F6.2). See docs/adr/0001-worker-presets.md.',
+        '- id: webserver',
+        '  config:',
+        '    host: 127.0.0.1',
+        '    port: 3082',
+        '- id: dsh-superagent',
+        '  config:',
+        '    stateDir: /home/agent/.dsh/state/superagent',
+        '',
+        _render_host_model_routes(routes),
+        '',
+        _render_worker_preset(allowlist),
+        '',
+        '# Role presets workers may spawn. Personas live in roles/*.md (copied into the image).',
+        insert,
+        '',
+    ]
+    return '\n'.join(parts)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: `render-profile <absolute-yaml> [--output path]` for image build."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog='superagent_config')
+    sub = parser.add_subparsers(dest='command', required=True)
+    render = sub.add_parser('render-profile', help='Render cordis.patch.yml from superagent.yaml')
+    render.add_argument('path', help='Absolute path to superagent.yaml')
+    render.add_argument('--output', '-o', help='Write here instead of stdout')
+    render.add_argument(
+        '--apply-env',
+        action='store_true',
+        help='Apply SUPERAGENT_* environment overrides (start-time; build omits this)',
+    )
+    args = parser.parse_args(argv)
+
+    if args.command == 'render-profile':
+        # Build-time: file only. Start-time (entrypoint --apply-env): env wins.
+        resolved = load(args.path, environ=os.environ if args.apply_env else {})
+        text = render_profile_patch(resolved)
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as file:
+                file.write(text)
+        else:
+            sys.stdout.write(text)
+        return 0
+    return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

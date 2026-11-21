@@ -339,7 +339,9 @@ class ReviewerModelSelectionTest(unittest.TestCase):
 
 
 class EntrypointClaudeReviewConfigTest(unittest.TestCase):
-    """superagent-entrypoint.sh writes small-model routing into claude-review.json."""
+    """superagent-entrypoint.sh writes reviewer settings from superagent.yaml into claude-review.json."""
+
+    SAMPLE = os.path.join(ROOT, 'superagent.yaml')
 
     def write_config(self, **environ):
         """Run the entrypoint's claude-review.json writer with the given env."""
@@ -352,6 +354,8 @@ class EntrypointClaudeReviewConfigTest(unittest.TestCase):
         env = {
             'PATH': os.environ.get('PATH', ''),
             'HOME': os.environ.get('HOME', ''),
+            'SUPERAGENT_CONFIG_PATH': self.SAMPLE,
+            'PYTHONPATH': os.path.join(ROOT, 'scripts'),
             **environ,
         }
         result = subprocess.run(
@@ -361,22 +365,29 @@ class EntrypointClaudeReviewConfigTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def test_unset_small_model_keeps_today_json_shape(self):
-        data = self.write_config(ANTHROPIC_API_KEY='k', SUPERAGENT_REVIEWER_MODEL='opus')
+    def test_file_alone_writes_todays_reviewer_settings(self):
+        """With only the sample file, claude-review.json matches today's reviewer variables."""
+        data = self.write_config(ANTHROPIC_API_KEY='k')
         self.assertEqual(data['model'], 'opus')
+        self.assertEqual(data['small_model'], 'sonnet')
+        self.assertEqual(data['small_diff_lines'], 200)
         self.assertEqual(data['env'], {'ANTHROPIC_API_KEY': 'k'})
-        self.assertNotIn('small_model', data)
-        self.assertNotIn('small_diff_lines', data)
 
-    def test_small_model_and_default_threshold_go_into_json(self):
+    def test_reviewer_env_overrides_file(self):
         data = self.write_config(
             ANTHROPIC_API_KEY='k',
-            SUPERAGENT_REVIEWER_MODEL='opus',
-            SUPERAGENT_REVIEWER_SMALL_MODEL='haiku',
+            SUPERAGENT_REVIEWER_MODEL='haiku',
+            SUPERAGENT_REVIEWER_EFFORT='low',
+            SUPERAGENT_REVIEWER_SMALL_MODEL='sonnet',
+            SUPERAGENT_REVIEWER_SMALL_DIFF_LINES='50',
         )
-        self.assertEqual(data['model'], 'opus')
-        self.assertEqual(data['small_model'], 'haiku')
-        self.assertEqual(data['small_diff_lines'], 200)
+        self.assertEqual(data['model'], 'haiku')
+        self.assertEqual(data['small_model'], 'sonnet')
+        self.assertEqual(data['small_diff_lines'], 50)
+        self.assertEqual(data['env'], {
+            'ANTHROPIC_API_KEY': 'k',
+            'CLAUDE_CODE_EFFORT_LEVEL': 'low',
+        })
 
     def test_custom_small_diff_lines(self):
         data = self.write_config(

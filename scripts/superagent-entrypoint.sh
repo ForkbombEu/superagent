@@ -42,18 +42,40 @@ unset GH_TOKEN GITHUB_TOKEN
 
 # claude-review reads the Claude Code credential, model(s) and effort from here:
 # DSH strips *_KEY/*_TOKEN variables from worker shells, and neither DSH nor
-# DeepSeek needs them in their environment.
+# DeepSeek needs them in their environment. Model fields come from
+# superagent.yaml (env overrides win) via the loader.
 install -m 0600 /dev/null /run/superagent-secrets/claude-review.json
 python3 > /run/superagent-secrets/claude-review.json <<'PY'
-import json, os
+import importlib.util, json, os, sys
+
+def _load_config_module():
+    path = '/usr/local/share/superagent/superagent_config.py'
+    if os.path.isfile(path):
+        spec = importlib.util.spec_from_file_location('superagent_config', path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['superagent_config'] = module
+        spec.loader.exec_module(module)
+        return module
+    # Tests extract this block and set PYTHONPATH to scripts/.
+    import superagent_config as module
+    return module
+
+cfg = _load_config_module()
+path = (os.environ.get('SUPERAGENT_CONFIG_PATH') or '').strip() or cfg.DEPLOYMENT_CONFIG_PATH
+try:
+    resolved = cfg.load(path)
+except cfg.ValidationError as error:
+    sys.exit(f'superagent-entrypoint: {error}')
 credentials = {name: os.environ[name] for name in ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN') if os.environ.get(name)}
-effort = os.environ.get('SUPERAGENT_REVIEWER_EFFORT')
-config = {'model': os.environ.get('SUPERAGENT_REVIEWER_MODEL', ''),
-          'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})}}
-small = os.environ.get('SUPERAGENT_REVIEWER_SMALL_MODEL', '')
-if small:
-    config['small_model'] = small
-    config['small_diff_lines'] = int(os.environ.get('SUPERAGENT_REVIEWER_SMALL_DIFF_LINES') or 200)
+reviewer = resolved.reviewer or {}
+effort = reviewer.get('effort') or ''
+config = {
+    'model': reviewer.get('model') or '',
+    'env': {**credentials, **({'CLAUDE_CODE_EFFORT_LEVEL': effort} if effort else {})},
+}
+if reviewer.get('small_model'):
+    config['small_model'] = reviewer['small_model']
+    config['small_diff_lines'] = int(reviewer.get('small_diff_lines') or 200)
 print(json.dumps(config))
 PY
 unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
@@ -90,10 +112,19 @@ elif [ ! -d "$repo_checkout/.git" ]; then
   exit 1
 fi
 
+# Re-apply Host model routes (and presets) from superagent.yaml + env before DSH
+# loads the profile. Build baked the file alone; start-time SUPERAGENT_TIER_* wins.
+CONFIG_PATH="${SUPERAGENT_CONFIG_PATH:-/usr/local/share/superagent/superagent.yaml}"
+PROFILE_PATCH="${HOME}/.dsh/profiles/superagent/cordis.patch.yml"
+if [ -f /usr/local/share/superagent/superagent_config.py ] && [ -f "$CONFIG_PATH" ]; then
+  python3 /usr/local/share/superagent/superagent_config.py render-profile --apply-env \
+    "$CONFIG_PATH" -o "$PROFILE_PATCH"
+fi
+
 # DSH runs on localhost (3082); expose 3083 ONLY to the internal dashboard sidecar.
 socat TCP-LISTEN:3083,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:3082 &
-# Apply the environment's Superagent settings once DSH answers. The subshell
-# orphans it to tini (compose `init: true`), which reaps it when it finishes.
+# Apply Superagent settings from the file (env overrides) once DSH answers. The
+# subshell orphans it to tini (compose `init: true`), which reaps it when it finishes.
 ( /usr/local/bin/superagent-configure & )
 # Retry tickets waiting for dependencies once those are done, every minute.
 ( /usr/local/bin/superagent-dependencies & )

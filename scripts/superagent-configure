@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply Superagent settings from the environment through the loopback management API.
+"""Apply Superagent settings from superagent.yaml (env overrides) through the loopback management API.
 
 superagent-entrypoint.sh starts this in the background next to DSH. On every start it
 converges these fields, overwriting panel edits of the same fields:
@@ -7,13 +7,13 @@ converges these fields, overwriting panel edits of the same fields:
 - Source GitHub repository: $GITHUB_REPOSITORY; agent CLI: /usr/local/bin/gh-agent
 - Executor prepare command: /usr/local/bin/prepare-worktree.sh
 - Policy GitHub allowed list: $SUPERAGENT_GITHUB_ALLOWED_USERS, when set
-- Executor model: $SUPERAGENT_EXECUTOR_PROVIDER, $SUPERAGENT_EXECUTOR_MODEL and the
-  optional $SUPERAGENT_EXECUTOR_REASONING_EFFORT, when set
+- Executor model: from superagent.yaml roles.implementer (resolved), overridden by
+  $SUPERAGENT_EXECUTOR_PROVIDER / $SUPERAGENT_EXECUTOR_MODEL /
+  $SUPERAGENT_EXECUTOR_REASONING_EFFORT when set
 - Executor concurrent Tickets: $SUPERAGENT_MAX_WORKERS (1-16), when set
-- Subagent model routes: validates $SUPERAGENT_TIER_LOW_* / $SUPERAGENT_TIER_MID_*
-  (provider + model, optional reasoning effort). Host allowedModels are applied by
-  the profile patch on subagent-model-selection-settings (see
-  docs/adr/0001-worker-presets.md); this script only fails fast on a half-set tier.
+- Subagent model routes: from the file's tiers (and $SUPERAGENT_TIER_* overrides).
+  Host allowedModels are re-applied at start by the entrypoint (profile patch);
+  this script fails fast on a half-set tier via the loader.
 - Prompts > Delivery requirements: /usr/local/share/superagent/delivery.md, run
   superagent check then squash-merge, followed by delivery-uat.md, the user
   acceptance tests procedure, when $SUPERAGENT_UAT_ENABLED is true
@@ -21,6 +21,7 @@ converges these fields, overwriting panel edits of the same fields:
 Everything else stays with the panel. A save that changes setup restarts dsh-superagent;
 the loop re-reads settings after each save until nothing differs.
 """
+import importlib.util
 import json
 import os
 import re
@@ -47,6 +48,31 @@ class Unavailable(Exception):
     """The management API is not answering, typically because dsh-superagent is (re)starting."""
 
 
+def _load_config_module():
+    candidates = (
+        '/usr/local/share/superagent/superagent_config.py',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'superagent_config.py'),
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location('superagent_config', path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules['superagent_config'] = module
+            spec.loader.exec_module(module)
+            return module
+    sys.exit('superagent-configure: superagent_config.py not found')
+
+
+def resolved_config():
+    """Load deployment superagent.yaml with env overrides (env wins)."""
+    cfg = _load_config_module()
+    path = (os.environ.get('SUPERAGENT_CONFIG_PATH') or '').strip() or cfg.DEPLOYMENT_CONFIG_PATH
+    try:
+        return cfg.load(path)
+    except cfg.ValidationError as error:
+        sys.exit(f'superagent-configure: {error}')
+
+
 def call(method, path, body=None):
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(API + path, data=data, method=method, headers=HEADERS)
@@ -69,43 +95,21 @@ def allowed_users():
     return users or None
 
 
-def tier_routes():
-    """Host `allowedModels` routes from SUPERAGENT_TIER_LOW_* / SUPERAGENT_TIER_MID_*.
-
-    Each tier needs both PROVIDER and MODEL when any of its fields is set. Optional
-    REASONING_EFFORT is accepted for naming parity with SUPERAGENT_EXECUTOR_* but is
-    not part of the Host allowlist (provider + model only). Duplicate provider/model
-    pairs collapse to one route — the Host setting rejects repeats.
-    """
-    routes, seen = [], set()
-    for tier in ('LOW', 'MID'):
-        prefix = f'SUPERAGENT_TIER_{tier}_'
-        provider = os.environ.get(prefix + 'PROVIDER', '').strip()
-        model = os.environ.get(prefix + 'MODEL', '').strip()
-        effort = os.environ.get(prefix + 'REASONING_EFFORT', '').strip()
-        if not (provider or model or effort):
-            continue
-        if not (provider and model):
-            sys.exit(f'superagent-configure: set both {prefix}PROVIDER and {prefix}MODEL')
-        key = f'{provider}\0{model}'
-        if key in seen:
-            continue
-        seen.add(key)
-        routes.append({'provider': provider, 'model': model})
-    return routes
+def tier_routes(resolved=None):
+    """Host `allowedModels` routes from the resolved config (file + SUPERAGENT_TIER_*)."""
+    if resolved is None:
+        resolved = resolved_config()
+    return list(resolved.tier_routes)
 
 
-def executor_settings():
-    """Executor fields the environment sets: `model` and `maxWorkers`, each only when configured."""
-    provider = os.environ.get('SUPERAGENT_EXECUTOR_PROVIDER', '').strip()
-    model = os.environ.get('SUPERAGENT_EXECUTOR_MODEL', '').strip()
-    effort = os.environ.get('SUPERAGENT_EXECUTOR_REASONING_EFFORT', '').strip()
-    workers = os.environ.get('SUPERAGENT_MAX_WORKERS', '').strip()
+def executor_settings(resolved=None):
+    """Executor fields from the file (env overrides already applied): `model` and optional `maxWorkers`."""
+    if resolved is None:
+        resolved = resolved_config()
     settings = {}
-    if provider or model or effort:
-        if not (provider and model):
-            sys.exit('superagent-configure: set both SUPERAGENT_EXECUTOR_PROVIDER and SUPERAGENT_EXECUTOR_MODEL')
-        settings['model'] = {'provider': provider, 'model': model, **({'reasoningEffort': effort} if effort else {})}
+    if resolved.executor:
+        settings['model'] = dict(resolved.executor)
+    workers = os.environ.get('SUPERAGENT_MAX_WORKERS', '').strip()
     if workers:
         if not (workers.isdigit() and 1 <= int(workers) <= 16):
             sys.exit('superagent-configure: SUPERAGENT_MAX_WORKERS must be a whole number from 1 to 16')
@@ -134,9 +138,10 @@ def changes(view, prompts, users, executor_env, delivery):
 
 
 def main():
-    users, executor_env = allowed_users(), executor_settings()
-    # Validate tier env early; Host routes themselves come from the profile patch.
-    tier_routes()
+    resolved = resolved_config()
+    users, executor_env = allowed_users(), executor_settings(resolved)
+    # Validate / materialize tier routes early; Host routes themselves come from the profile patch.
+    tier_routes(resolved)
     delivery = ''
     uat = os.environ.get('SUPERAGENT_UAT_ENABLED') == 'true'
     for path in (DELIVERY, *([DELIVERY_UAT] if uat else [])):

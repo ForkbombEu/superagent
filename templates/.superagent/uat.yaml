@@ -1,0 +1,9 @@
+version: 1
+default_environment: local
+environments:
+  local:
+    type: local
+    setup: mise run uat:setup
+    start: mise run uat:start
+    ready: http://127.0.0.1:3000/health
+    cleanup: mise run uat:cleanup

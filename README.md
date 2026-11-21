@@ -282,25 +282,36 @@ dsh-superagent limits its workers to a fixed list of tools (`WORK_TOOLS` in its
 
 ### Target repository setup
 
-Start each repository the deployment works on from
-[`templates/AGENTS.md`](templates/AGENTS.md): copy it to the repository root
-and fill in its **Project** section. It states the merge, commit and
-pull-request rules above, which the repository's own instructions must not
-contradict, and how to write issues so they run without a person (the
-`@forkboteu` mention, one PR per issue, `Depends on` lines, no holds). To fill
-a backlog, ask any coding agent to read that `AGENTS.md` and
-`docs/specification.md` and open the issues, with your `gh` account.
+Scaffold a product repository with
+[`superagent init <dir>`](scripts/superagent) (from a Superagent checkout or
+the deployment image). It writes target-owned files from
+[`templates/`](templates/): [`AGENTS.md`](templates/AGENTS.md),
+[`.superagent/uat.yaml`](templates/.superagent/uat.yaml), and
+[`.agents/skills/`](templates/.agents/skills/). Fill in the **Project**
+section of `AGENTS.md`. That file states the merge, commit and pull-request
+rules above, which the repository's own instructions must not contradict, and
+how to write issues so they run without a person (the `@forkboteu` mention,
+one PR per issue, `Depends on` lines, no holds). To fill a backlog, ask any
+coding agent to read that `AGENTS.md` and `docs/specification.md` and open
+the issues, with your `gh` account. `init` refuses to overwrite existing
+paths unless you pass `--force`.
 
 #### Planning side
 
-Copy [`templates/.agents/skills/`](templates/.agents/skills/) into the target
-repository as `.agents/skills/` so a local agent can load the planning skills.
+Planning skills live under `.agents/skills/` after `init`.
 [`architect`](templates/.agents/skills/architect/SKILL.md) builds a module map
 (with codebase-memory-mcp code-graph queries when available) and records ADRs;
 [`write-issues`](templates/.agents/skills/write-issues/SKILL.md) splits a
 specification into issues that carry Effort, `Depends on` and optional UAT;
 run `python templates/.agents/skills/write-issues/check-fixtures.py` in this
 repository to see a dry-run sample that passes the template checks.
+
+When the deployment's templates move forward, run
+`superagent upgrade <dir>` in the product repository. It refreshes
+`.agents/skills/**` from the same template root as `init` and writes
+`.superagent/UPGRADE.md` as a human/agent work order of what changed
+(`AGENTS.md` and `.superagent/uat.yaml` stay as you left them). Review and
+commit that work order with the refreshed skills.
 
 One deployment works on one repository (`GITHUB_REPOSITORY`); use a separate
 Coolify application for each further repository.

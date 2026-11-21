@@ -11,10 +11,15 @@ export const PROVIDER_ID = 'superagent-claude'
 /** Default Claude CLI on the Superagent image (shadow or real). */
 export const DEFAULT_CLAUDE_EXECUTABLE = '/usr/local/bin/claude'
 
+/** Max characters shown for Bash activity lines (truncate long commands). */
+export const ACTIVITY_BASH_MAX = 120
+
 const REJECTED_PURPOSES = new Set([
   'session-title',
   'compaction',
 ])
+
+const RESUME_NOTICE = 'Claude session resume failed; started a fresh session.\n\n'
 
 /**
  * @param {import('@deepseek-ai/dsh-llm').GenerateOptions} options
@@ -63,6 +68,17 @@ export function effortFromReasoning(effort) {
 }
 
 /**
+ * Truncate a single-line activity summary for long Bash commands.
+ * @param {string} command
+ * @param {number} [max]
+ * @returns {string}
+ */
+export function truncateBashCommand(command, max = ACTIVITY_BASH_MAX) {
+  if (command.length <= max) return command
+  return `${command.slice(0, max)}…`
+}
+
+/**
  * One-line activity summary for a tool_use block.
  * @param {{ name?: string, input?: Record<string, unknown> }} tool
  * @returns {string}
@@ -74,7 +90,7 @@ export function activityLine(tool) {
   if (name === 'Write' && typeof input.file_path === 'string') return `Write ${input.file_path}`
   if (name === 'Edit' && typeof input.file_path === 'string') return `Edit ${input.file_path}`
   if ((name === 'Bash' || name === 'PowerShell') && typeof input.command === 'string') {
-    return `Bash: ${input.command}`
+    return `Bash: ${truncateBashCommand(input.command)}`
   }
   if (name === 'Agent' || name === 'Task') {
     const desc = typeof input.description === 'string'
@@ -89,6 +105,32 @@ export function activityLine(tool) {
     ? input.file_path
     : typeof input.path === 'string' ? input.path : undefined
   return path ? `${name} ${path}` : name
+}
+
+/**
+ * True when an SDK result message indicates the resume session was unusable.
+ * @param {unknown} message
+ * @param {boolean} resumed
+ * @returns {boolean}
+ */
+export function isFailedResumeResult(message, resumed) {
+  if (!resumed || !message || typeof message !== 'object') return false
+  const row = /** @type {{ type?: string, subtype?: string, errors?: string[] }} */ (message)
+  if (row.type !== 'result') return false
+  if (!row.subtype || row.subtype === 'success') return false
+  const detail = Array.isArray(row.errors) ? row.errors.join(' ') : String(row.subtype)
+  return /resume|session/i.test(detail)
+}
+
+/**
+ * @param {unknown} error
+ * @param {boolean} resumed
+ * @returns {boolean}
+ */
+export function isFailedResumeError(error, resumed) {
+  if (!resumed) return false
+  const message = error instanceof Error ? error.message : String(error)
+  return /resume|session/i.test(message)
 }
 
 /**
@@ -109,6 +151,139 @@ function* emitTextBlock(text, index, blockType) {
     index,
     block: blockType === 'text' ? { type: 'text', text } : { type: 'reasoning', text },
   }
+}
+
+/**
+ * Stream one SDK query into DSH chunks. Mutates `state` with session/usage/text.
+ * @param {object} args
+ * @param {AsyncIterable<unknown>} args.messages
+ * @param {import('@deepseek-ai/dsh-llm').GenerateOptions} args.options
+ * @param {AbortController} args.controller
+ * @param {string} args.agentId
+ * @param {{
+ *   blockIndex: number,
+ *   openText: string,
+ *   textStarted: boolean,
+ *   pendingUsage: { inputTokens: number, outputTokens: number } | undefined,
+ *   claudeSessionId: string | undefined,
+ *   sawResult: boolean,
+ *   resumeFailed: boolean,
+ *   resumed: boolean,
+ * }} args.state
+ * @param {string} [args.textPrefix] prepended once before the first text delta
+ * @returns {AsyncGenerator<import('@deepseek-ai/dsh-llm').StreamChunk>}
+ */
+async function* consumeQuery({ messages, options, controller, agentId, state, textPrefix = '' }) {
+  let prefix = textPrefix
+
+  const flushOpenText = function* () {
+    if (!state.textStarted) return
+    yield {
+      type: 'block-end',
+      index: state.blockIndex,
+      block: { type: 'text', text: state.openText },
+    }
+    state.blockIndex += 1
+    state.openText = ''
+    state.textStarted = false
+  }
+
+  const ensureTextOpen = function* () {
+    if (state.textStarted) return
+    yield { type: 'block-start', index: state.blockIndex, blockType: 'text' }
+    state.textStarted = true
+    if (prefix.length > 0) {
+      state.openText += prefix
+      yield { type: 'text-delta', index: state.blockIndex, text: prefix }
+      prefix = ''
+    }
+  }
+
+  const emitDelta = function* (piece) {
+    if (typeof piece !== 'string' || piece.length === 0) return
+    yield* ensureTextOpen()
+    state.openText += piece
+    yield { type: 'text-delta', index: state.blockIndex, text: piece }
+  }
+
+  for await (const message of messages) {
+    if (options.signal?.aborted || controller.signal.aborted) {
+      yield* flushOpenText()
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'aborted',
+          failure: { code: 'aborted', message: 'Claude Code turn cancelled' },
+        },
+      }
+      return
+    }
+
+    if (message?.type === 'system' && message?.subtype === 'init') {
+      if (typeof message.session_id === 'string' && message.session_id.length > 0) {
+        state.claudeSessionId = message.session_id
+        if (agentId) setClaudeSessionId(agentId, state.claudeSessionId)
+      }
+      continue
+    }
+
+    if (message?.type === 'stream_event') {
+      const event = message.event
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        yield* emitDelta(event.delta.text ?? '')
+      }
+      continue
+    }
+
+    if (message?.type === 'assistant') {
+      const content = message.message?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        if (block.type === 'text' && typeof block.text === 'string') {
+          // Prefer streamed partials; only take final assistant text when nothing streamed.
+          if (!state.textStarted && state.openText.length === 0) {
+            yield* emitDelta(block.text)
+          } else if (block.text.startsWith(state.openText) && block.text.length > state.openText.length) {
+            yield* emitDelta(block.text.slice(state.openText.length))
+          }
+        } else if (block.type === 'tool_use') {
+          yield* flushOpenText()
+          const line = activityLine(block)
+          yield* emitTextBlock(line, state.blockIndex, 'reasoning')
+          state.blockIndex += 1
+        }
+      }
+      continue
+    }
+
+    if (message?.type === 'result') {
+      state.sawResult = true
+      if (isFailedResumeResult(message, state.resumed)) {
+        state.resumeFailed = true
+      }
+      if (typeof message.usage === 'object' && message.usage) {
+        state.pendingUsage = {
+          inputTokens: message.usage.input_tokens ?? message.usage.inputTokens ?? 0,
+          outputTokens: message.usage.output_tokens ?? message.usage.outputTokens ?? 0,
+        }
+      }
+      if (typeof message.result === 'string' && message.result.length > 0
+        && !state.textStarted && state.openText.length === 0) {
+        yield* emitDelta(message.result)
+      }
+    }
+  }
+
+  // Resume notice with an empty retry body still surfaces in the turn text.
+  if (prefix.length > 0 && !state.textStarted) {
+    yield { type: 'block-start', index: state.blockIndex, blockType: 'text' }
+    state.textStarted = true
+    state.openText = prefix
+    yield { type: 'text-delta', index: state.blockIndex, text: prefix }
+    prefix = ''
+  }
+
+  yield* flushOpenText()
 }
 
 /**
@@ -139,11 +314,6 @@ export async function* runTurn({ options, agent, deps = {} }) {
 
   const prompt = promptFromMessages(options.messages)
   const storedSessionId = agentId ? getClaudeSessionId(agentId) : undefined
-  let resumeNotice = ''
-  let resume = storedSessionId
-  if (storedSessionId) {
-    // resume is attempted; a failed resume is reported in the turn text below
-  }
 
   const controller = new AbortController()
   const onAbort = () => {
@@ -153,7 +323,7 @@ export async function* runTurn({ options, agent, deps = {} }) {
 
   const effort = effortFromReasoning(options.reasoningEffort)
   /** @type {Record<string, unknown>} */
-  const queryOptions = {
+  const baseOptions = {
     cwd,
     pathToClaudeCodeExecutable: executable,
     env: buildEnv(),
@@ -162,153 +332,101 @@ export async function* runTurn({ options, agent, deps = {} }) {
     abortController: controller,
     model: options.model,
     ...(effort === undefined ? {} : { effort }),
-    ...(resume === undefined ? {} : { resume }),
   }
 
-  let blockIndex = 0
-  let text = ''
-  let pendingUsage
-  let claudeSessionId = storedSessionId
-  let sawResult = false
-  let resumeFailed = false
+  /** @type {{
+   *   blockIndex: number,
+   *   openText: string,
+   *   textStarted: boolean,
+   *   pendingUsage: { inputTokens: number, outputTokens: number } | undefined,
+   *   claudeSessionId: string | undefined,
+   *   sawResult: boolean,
+   *   resumeFailed: boolean,
+   *   resumed: boolean,
+   * }} */
+  const state = {
+    blockIndex: 0,
+    openText: '',
+    textStarted: false,
+    pendingUsage: undefined,
+    claudeSessionId: storedSessionId,
+    sawResult: false,
+    resumeFailed: false,
+    resumed: Boolean(storedSessionId),
+  }
 
   try {
-    const q = runQuery({ prompt, options: queryOptions })
-    for await (const message of q) {
-      if (options.signal?.aborted) {
+    const queryOptions = {
+      ...baseOptions,
+      ...(storedSessionId === undefined ? {} : { resume: storedSessionId }),
+    }
+
+    try {
+      const q = runQuery({ prompt, options: queryOptions })
+      for await (const chunk of consumeQuery({
+        messages: q,
+        options,
+        controller,
+        agentId,
+        state,
+      })) {
+        yield chunk
+        if (chunk.type === 'finish') return
+      }
+    } catch (error) {
+      if (isFailedResumeError(error, state.resumed)) {
+        state.resumeFailed = true
+      } else if (options.signal?.aborted || controller.signal.aborted) {
         yield {
           type: 'finish',
           reason: {
             kind: 'aborted',
-            failure: { code: 'aborted', message: 'Claude Code turn cancelled' },
+            failure: {
+              code: 'aborted',
+              message: error instanceof Error ? error.message : String(error),
+            },
           },
         }
         return
-      }
-
-      if (message?.type === 'system' && message?.subtype === 'init') {
-        if (typeof message.session_id === 'string' && message.session_id.length > 0) {
-          claudeSessionId = message.session_id
-          if (agentId) setClaudeSessionId(agentId, claudeSessionId)
-        }
-        continue
-      }
-
-      if (message?.type === 'stream_event') {
-        const event = message.event
-        if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          text += event.delta.text ?? ''
-        }
-        continue
-      }
-
-      if (message?.type === 'assistant') {
-        const content = message.message?.content
-        if (!Array.isArray(content)) continue
-        for (const block of content) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            // Prefer streamed partials when present; otherwise take the final text.
-            if (text.length === 0) text = block.text
-            else if (!text.endsWith(block.text) && block.text.startsWith(text)) text = block.text
-            else if (text.length === 0) text = block.text
-          } else if (block.type === 'tool_use') {
-            if (text.length > 0) {
-              yield* emitTextBlock(text, blockIndex, 'text')
-              blockIndex += 1
-              text = ''
-            }
-            const line = activityLine(block)
-            yield* emitTextBlock(line, blockIndex, 'reasoning')
-            blockIndex += 1
-          }
-        }
-        continue
-      }
-
-      if (message?.type === 'result') {
-        sawResult = true
-        if (message.subtype && message.subtype !== 'success') {
-          if (resume && /resume|session/i.test(String(message.errors?.join?.(' ') ?? message.subtype))) {
-            resumeFailed = true
-          }
-        }
-        if (typeof message.usage === 'object' && message.usage) {
-          pendingUsage = {
-            inputTokens: message.usage.input_tokens ?? message.usage.inputTokens ?? 0,
-            outputTokens: message.usage.output_tokens ?? message.usage.outputTokens ?? 0,
-          }
-        }
-        if (typeof message.result === 'string' && message.result.length > 0 && text.length === 0) {
-          text = message.result
-        }
+      } else {
+        throw error
       }
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (resume && /resume|session/i.test(message)) {
-      resumeFailed = true
-      resumeNotice = `Claude session resume failed; started a fresh session.\n\n`
+
+    if (state.resumeFailed) {
       if (agentId) setClaudeSessionId(agentId, undefined)
-      // One retry without resume for Phase 0 continuity proof resilience.
+      state.resumed = false
+      state.sawResult = false
+      state.openText = ''
+      state.textStarted = false
+      state.claudeSessionId = undefined
+
       const retry = runQuery({
         prompt,
-        options: { ...queryOptions, resume: undefined },
+        options: { ...baseOptions },
       })
-      text = ''
-      for await (const message2 of retry) {
-        if (message2?.type === 'system' && message2?.subtype === 'init'
-          && typeof message2.session_id === 'string') {
-          claudeSessionId = message2.session_id
-          if (agentId) setClaudeSessionId(agentId, claudeSessionId)
-        }
-        if (message2?.type === 'stream_event') {
-          const event = message2.event
-          if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-            text += event.delta.text ?? ''
-          }
-        }
-        if (message2?.type === 'assistant') {
-          for (const block of message2.message?.content ?? []) {
-            if (block.type === 'text' && typeof block.text === 'string' && text.length === 0) {
-              text = block.text
-            }
-          }
-        }
-        if (message2?.type === 'result' && typeof message2.result === 'string' && text.length === 0) {
-          text = message2.result
-        }
+      for await (const chunk of consumeQuery({
+        messages: retry,
+        options,
+        controller,
+        agentId,
+        state,
+        textPrefix: RESUME_NOTICE,
+      })) {
+        yield chunk
+        if (chunk.type === 'finish') return
       }
-      sawResult = true
-    } else if (options.signal?.aborted || controller.signal.aborted) {
-      yield {
-        type: 'finish',
-        reason: {
-          kind: 'aborted',
-          failure: { code: 'aborted', message },
-        },
-      }
-      return
-    } else {
-      throw error
     }
+
+    if (!state.sawResult && state.blockIndex === 0 && state.openText.length === 0) {
+      throw new Error('superagent-claude: Claude Code returned no result')
+    }
+
+    if (state.pendingUsage) {
+      yield { type: 'usage', usage: state.pendingUsage }
+    }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   } finally {
     options.signal?.removeEventListener('abort', onAbort)
   }
-
-  if (resumeFailed && !resumeNotice) {
-    resumeNotice = `Claude session resume failed; started a fresh session.\n\n`
-  }
-
-  const finalText = `${resumeNotice}${text}`
-  if (finalText.length > 0) {
-    yield* emitTextBlock(finalText, blockIndex, 'text')
-    blockIndex += 1
-  } else if (!sawResult) {
-    throw new Error('superagent-claude: Claude Code returned no result')
-  }
-
-  if (pendingUsage) {
-    yield { type: 'usage', usage: pendingUsage }
-  }
-  yield { type: 'finish', reason: { kind: 'stop' } }
 }

@@ -1,0 +1,15 @@
+# Thin Claude Code chat preset + provider for Superagent.
+# Preset id and provider id are both `superagent-claude`.
+- insert:
+    - id: preset-superagent-claude
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: superagent-claude
+        name: Claude (Superagent)
+        description: Run Claude Code as the agent of this conversation on the repository checkout.
+        order: 10
+        plugins:
+          - id: superagent-claude-route
+            name: superagent-claude/route
+    - id: llm-superagent-claude
+      name: superagent-claude

@@ -69,6 +69,12 @@ RUN --mount=type=cache,target=/var/cache/pnpm-store \
     pnpm build && \
     chown -R agent:agent /opt/dsh-superagent /home/agent
 
+COPY dsh/claude /opt/superagent-claude
+RUN --mount=type=cache,target=/var/cache/npm \
+    npm ci --omit=dev --prefer-offline --cache /var/cache/npm \
+      --prefix /opt/superagent-claude \
+ && chown -R agent:agent /opt/superagent-claude
+
 COPY scripts/gh-agent scripts/claude-agent scripts/superagent-entrypoint.sh scripts/prepare-worktree.sh \
      scripts/superagent-configure scripts/superagent-dependencies scripts/superagent-uat-recovery \
      scripts/claude-review scripts/uat-test scripts/superagent scripts/superagent_checks.py /usr/local/bin/
@@ -117,6 +123,7 @@ USER agent
 RUN set -eu; \
     dsh superagent --from-default-profile web --dump-config > /dev/null; \
     dsh plugin --profile superagent add 'link:/opt/dsh-superagent'; \
+    dsh plugin --profile superagent add 'link:/opt/superagent-claude'; \
     mkdir -p "$DSH_HOME/state/superagent"; \
     cp /usr/local/share/superagent/profile.patch.yml \
       "$DSH_HOME/profiles/superagent/cordis.patch.yml"

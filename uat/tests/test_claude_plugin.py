@@ -620,6 +620,63 @@ class ClaudePluginPermissions(unittest.TestCase):
             self.assertTrue(report['seen'][0]['hasCanUseTool'])
             self.assertEqual(report['seen'][0]['mcp'], 'codebase-memory-mcp')
 
+    def test_run_turn_wires_opusplan_permission_mode_and_can_use_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets = os.path.join(tmp, 'claude-review.json')
+            with open(secrets, 'w', encoding='utf-8') as file:
+                json.dump({'env': {'ANTHROPIC_API_KEY': 'test-key-not-real'}}, file)
+            script = textwrap.dedent(f'''\
+                import {{ runTurn }} from './turn.js'
+                import {{ buildClaudeEnv }} from './credentials.js'
+
+                const seen = []
+                async function* fakeQuery({{ options }}) {{
+                  seen.push({{
+                    permissionMode: options.permissionMode,
+                    hasCanUseTool: typeof options.canUseTool === 'function',
+                    mcp: options.mcpServers && options.mcpServers['codebase-memory']
+                      ? options.mcpServers['codebase-memory'].command
+                      : null,
+                  }})
+                  yield {{ type: 'system', subtype: 'init', session_id: 's-plan' }}
+                  yield {{
+                    type: 'result',
+                    subtype: 'success',
+                    result: 'ok',
+                    usage: {{ input_tokens: 1, output_tokens: 1 }},
+                  }}
+                }}
+
+                const agent = {{
+                  id: 'agent-plan',
+                  session: {{ header: {{ cwd: {json.dumps(tmp)} }} }},
+                }}
+                for await (const _ of runTurn({{
+                  options: {{
+                    model: 'opusplan',
+                    messages: [{{ role: 'user', content: [{{ type: 'text', text: 'hi' }}] }}],
+                  }},
+                  agent,
+                  permissionRules: {{ allow: ['Read'], deny: ['WebFetch'] }},
+                  deps: {{
+                    runQuery: fakeQuery,
+                    buildEnv: () => buildClaudeEnv({{
+                      secretsPath: {json.dumps(secrets)},
+                      sourceEnv: {{ PATH: '/bin' }},
+                    }}),
+                  }},
+                }})) {{
+                  // drain
+                }}
+                process.stdout.write(JSON.stringify({{ seen }}))
+                ''')
+            result = _node(script, {'DSH_HOME': tmp})
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(report['seen'][0]['permissionMode'], 'plan')
+            self.assertTrue(report['seen'][0]['hasCanUseTool'])
+            self.assertEqual(report['seen'][0]['mcp'], 'codebase-memory-mcp')
+
 
 class ClaudePluginTurnResumeEmptyErrors(unittest.TestCase):
     def test_empty_errors_resume_result_retries_fresh(self):

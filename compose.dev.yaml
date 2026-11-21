@@ -5,9 +5,10 @@
 services:
   dashboard:
     ports:
-      - "8080:8080"
+      # 8080 is often taken by other local Superagent stacks; use 18080 here.
+      - "18080:8080"
   superagent:
     # Host the browser sends must match --trusted-host / --public-url.
     environment:
-      SERVICE_URL_DASHBOARD: http://localhost:8080
+      SERVICE_URL_DASHBOARD: http://localhost:18080
       SERVICE_FQDN_DASHBOARD: localhost

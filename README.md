@@ -291,6 +291,15 @@ contradict, and how to write issues so they run without a person (the
 a backlog, ask any coding agent to read that `AGENTS.md` and
 `docs/specification.md` and open the issues, with your `gh` account.
 
+#### Planning side
+
+Copy [`templates/.agents/skills/`](templates/.agents/skills/) into the target
+repository as `.agents/skills/` so a local agent can load the planning skills.
+[`write-issues`](templates/.agents/skills/write-issues/SKILL.md) splits a
+specification into issues that carry Effort, `Depends on` and optional UAT;
+run `python templates/.agents/skills/write-issues/check-fixtures.py` in this
+repository to see a dry-run sample that passes the template checks.
+
 One deployment works on one repository (`GITHUB_REPOSITORY`); use a separate
 Coolify application for each further repository.
 

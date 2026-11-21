@@ -13,15 +13,17 @@ printed.
 | Outside allow list → approval; both answers | **PASS** — curl Bash: reject → `CURL_BLOCKED` / deny; allow → `CURL_DONE 200` |
 | MCP executes under chat (leave Phase 1 dontAsk) | **PASS** — `mcp__…__list_projects` `behavior:allow`, text `MCP_OK credimi-attestbook` |
 | `AskUserQuestion` → `ctx.userQuestions` | **PASS** — unit (map + bridge); no interactive UI smoke |
-| Plan mode | **PASS** (low-cost) — model `opusplan` → `permissionMode: 'plan'` |
+| Plan mode | **PASS** — `opusplan` → `permissionMode: 'plan'`; plan holds Edit/Write/NotebookEdit (approval, not allow-list auto-allow); reads still auto-allow |
 | Empty-`errors` resume edge | **PASS** — unit |
 | Credential isolation re-check | **PASS** — `/proc/$DSH_PID/environ` empty of Claude keys (`DSH_PID=7`) |
 | `claude-review` stays `dontAsk` | **PASS** — script + review managed settings untouched |
 
 ## Security prerequisites
 
-1. **`canUseTool` deny-by-default** — deny rules first; allow-list auto-allow;
-   else `approval.request`; only `allowed-once` grants.
+1. **`canUseTool` deny-by-default** — deny rules first; allow-list auto-allow
+   (except under `plan`: Edit/Write/NotebookEdit/MultiEdit skip auto-allow and
+   go through `approval.request`); else `approval.request`; only `allowed-once`
+   grants.
 2. **Chat `default` / review `dontAsk`** — chat only; review script unchanged.
 3. **MCP after allow-list + bridge** — MCP on chat allow list auto-allows in
    `canUseTool` (no dialog); smoke saw `behavior: allow`.

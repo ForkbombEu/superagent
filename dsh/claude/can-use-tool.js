@@ -4,6 +4,9 @@
  */
 import { anyRuleMatches } from './permissions.js'
 
+/** File-mutating tools held for approval under Claude plan mode. */
+const PLAN_HELD_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit'])
+
 /**
  * Map Claude AskUserQuestion tool input to a DSH userQuestions.ask payload.
  * @param {Record<string, unknown>} input
@@ -75,6 +78,7 @@ export function mapAskUserQuestionAnswers(input, dshAnswer) {
  * @param {unknown} args.agent
  * @param {readonly string[]} args.allowRules
  * @param {readonly string[]} args.denyRules
+ * @param {'default' | 'plan' | string} [args.permissionMode]
  * @returns {import('@anthropic-ai/claude-agent-sdk').CanUseTool}
  */
 export function createCanUseTool({
@@ -83,6 +87,7 @@ export function createCanUseTool({
   agent,
   allowRules,
   denyRules,
+  permissionMode = 'default',
 }) {
   return async (toolName, input, options) => {
     const toolUseID = options?.toolUseID
@@ -128,11 +133,14 @@ export function createCanUseTool({
       }
     }
 
-    if (anyRuleMatches(allowRules, toolName, safeInput)) {
+    const onAllowList = anyRuleMatches(allowRules, toolName, safeInput)
+    const holdForPlan = permissionMode === 'plan' && PLAN_HELD_TOOLS.has(toolName)
+    if (onAllowList && !holdForPlan) {
       return allow()
     }
 
-    // Deny-by-default for anything outside the allow list: ask DSH, else deny.
+    // Deny-by-default for anything outside the allow list (or plan-held writes):
+    // ask DSH, else deny.
     if (!approval || typeof approval.request !== 'function') {
       return deny(`No approval bridge for ${toolName}`)
     }

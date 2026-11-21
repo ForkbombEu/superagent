@@ -367,18 +367,19 @@ export async function* runTurn({
   options.signal?.addEventListener('abort', onAbort, { once: true })
 
   const rules = permissionRules ?? loadRules(managedSettingsPath)
+
+  const effort = effortFromReasoning(options.reasoningEffort)
+  const model = options.model
+  // opusplan: Claude Code plan-mode alias; keep host prompts for ExitPlanMode etc.
+  const permissionMode = model === 'opusplan' ? 'plan' : 'default'
   const canUseTool = makeCanUseTool({
     approval,
     userQuestions,
     agent,
     allowRules: rules.allow,
     denyRules: rules.deny,
+    permissionMode,
   })
-
-  const effort = effortFromReasoning(options.reasoningEffort)
-  const model = options.model
-  // opusplan: Claude Code plan-mode alias; keep host prompts for ExitPlanMode etc.
-  const permissionMode = model === 'opusplan' ? 'plan' : 'default'
   /** @type {Record<string, unknown>} */
   const baseOptions = {
     cwd,

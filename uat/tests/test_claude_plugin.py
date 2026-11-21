@@ -516,6 +516,85 @@ class ClaudePluginPermissions(unittest.TestCase):
             ['Bash', 'WebSearch'],
         )
 
+    def test_plan_mode_holds_write_tools_despite_allow_list(self):
+        script = textwrap.dedent('''\
+            import { createCanUseTool } from './can-use-tool.js'
+
+            const calls = []
+            const approval = {
+              async request(req) {
+                calls.push(req.toolName)
+                if (req.toolName === 'Write') return 'rejected'
+                return 'allowed-once'
+              },
+            }
+            const canUseTool = createCanUseTool({
+              approval,
+              agent: { id: 'a1' },
+              allowRules: ['Read', 'Edit', 'Write', 'NotebookEdit', 'Grep'],
+              denyRules: [],
+              permissionMode: 'plan',
+            })
+            const opts = { toolUseID: 'tu-plan' }
+            const readOk = await canUseTool('Read', { file_path: 'a.ts' }, opts)
+            const grepOk = await canUseTool('Grep', { pattern: 'x' }, opts)
+            const editOk = await canUseTool('Edit', { file_path: 'a.ts' }, opts)
+            const writeNo = await canUseTool('Write', { file_path: 'b.ts' }, opts)
+            const notebookOk = await canUseTool('NotebookEdit', { notebook_path: 'n.ipynb' }, opts)
+            process.stdout.write(JSON.stringify({
+              readOk, grepOk, editOk, writeNo, notebookOk, calls,
+            }))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['readOk']['behavior'], 'allow')
+        self.assertEqual(report['grepOk']['behavior'], 'allow')
+        self.assertEqual(report['editOk']['behavior'], 'allow')
+        self.assertEqual(report['writeNo']['behavior'], 'deny')
+        self.assertEqual(report['notebookOk']['behavior'], 'allow')
+        self.assertEqual(report['calls'], ['Edit', 'Write', 'NotebookEdit'])
+
+    def test_can_use_tool_denies_without_approval_bridge(self):
+        script = textwrap.dedent('''\
+            import { createCanUseTool } from './can-use-tool.js'
+
+            const canUseTool = createCanUseTool({
+              agent: { id: 'a1' },
+              allowRules: ['Read'],
+              denyRules: [],
+            })
+            const denied = await canUseTool('Bash', { command: 'curl https://example.com' }, {
+              toolUseID: 'tu-no-approval',
+            })
+            process.stdout.write(JSON.stringify({ denied }))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['denied']['behavior'], 'deny')
+        self.assertIn('No approval bridge', report['denied']['message'])
+
+    def test_ask_user_question_denies_without_user_questions_bridge(self):
+        script = textwrap.dedent('''\
+            import { createCanUseTool } from './can-use-tool.js'
+
+            const canUseTool = createCanUseTool({
+              agent: { id: 'a1' },
+              allowRules: [],
+              denyRules: [],
+            })
+            const denied = await canUseTool('AskUserQuestion', {
+              questions: [{ question: 'Pick one?', header: 'Choice' }],
+            }, { toolUseID: 'q-missing' })
+            process.stdout.write(JSON.stringify({ denied }))
+            ''')
+        result = _node(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['denied']['behavior'], 'deny')
+        self.assertIn('no userQuestions bridge', report['denied']['message'])
+
     def test_ask_user_question_bridges_to_user_questions(self):
         script = textwrap.dedent('''\
             import { createCanUseTool, mapAskUserQuestionInput } from './can-use-tool.js'
@@ -630,6 +709,7 @@ class ClaudePluginPermissions(unittest.TestCase):
                 import {{ buildClaudeEnv }} from './credentials.js'
 
                 const seen = []
+                const canUseArgs = []
                 async function* fakeQuery({{ options }}) {{
                   seen.push({{
                     permissionMode: options.permissionMode,
@@ -660,6 +740,10 @@ class ClaudePluginPermissions(unittest.TestCase):
                   permissionRules: {{ allow: ['Read'], deny: ['WebFetch'] }},
                   deps: {{
                     runQuery: fakeQuery,
+                    createCanUseTool: (args) => {{
+                      canUseArgs.push({{ permissionMode: args.permissionMode }})
+                      return async () => ({{ behavior: 'allow' }})
+                    }},
                     buildEnv: () => buildClaudeEnv({{
                       secretsPath: {json.dumps(secrets)},
                       sourceEnv: {{ PATH: '/bin' }},
@@ -668,7 +752,7 @@ class ClaudePluginPermissions(unittest.TestCase):
                 }})) {{
                   // drain
                 }}
-                process.stdout.write(JSON.stringify({{ seen }}))
+                process.stdout.write(JSON.stringify({{ seen, canUseArgs }}))
                 ''')
             result = _node(script, {'DSH_HOME': tmp})
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -676,6 +760,7 @@ class ClaudePluginPermissions(unittest.TestCase):
             self.assertEqual(report['seen'][0]['permissionMode'], 'plan')
             self.assertTrue(report['seen'][0]['hasCanUseTool'])
             self.assertEqual(report['seen'][0]['mcp'], 'codebase-memory-mcp')
+            self.assertEqual(report['canUseArgs'], [{'permissionMode': 'plan'}])
 
 
 class ClaudePluginTurnResumeEmptyErrors(unittest.TestCase):

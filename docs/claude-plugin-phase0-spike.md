@@ -20,7 +20,7 @@ image with commits `5899338` + `ba0d6f8`. Drive path: `docker exec` →
 - `dsh plugin --profile superagent list`: `superagent-claude@link:/opt/superagent-claude`
   only (plus `dsh-superagent`); no `@norman-else/dsh-claude`.
 
-## Fact 2 — auth with empty DSH parent Claude env — **BLOCKED (not scrub)**
+## Fact 2 — auth with empty DSH parent Claude env — **PASS** (2026-11-21 re-prove)
 
 Parent check (real PID, not self-matching `pgrep`):
 
@@ -34,29 +34,31 @@ Entrypoint already `unset`s those after writing `/run/superagent-secrets/claude-
 (`scripts/superagent-entrypoint.sh`). Compose still injects them into *new*
 `docker exec` shells; smoke scrubbed them to match PID 7.
 
+Stack refresh for re-prove: local `.env` gained `ANTHROPIC_API_KEY` (OAuth still present
+but not refreshable); `docker compose -f compose.yaml -f compose.dev.yaml up -d
+--force-recreate superagent` so entrypoint rewrote the secrets file.
+
 Adapter path with scrubbed process env:
 
-- `buildClaudeEnv()` → child received a Claude credential from the secrets file
+- `buildClaudeEnv()` → child received Claude credential(s) from the secrets file
   (`childHasCred: true`, managed settings `/etc/claude-code-chat`).
-- SDK spawn reached Anthropic; **not** a missing-key / scrub failure.
-- Result: `401 OAuth access token has expired. Re-authenticate to continue.`
+- SDK spawn reached Anthropic; assistant text returned (`finish: stop`).
+- **Not** a missing-key / scrub failure. **HARD STOP for DSH spawn-scrub does not apply.**
 
-**HARD STOP for DSH spawn-scrub does not apply.** Credential overlay reaches the
-Claude child. Refresh `CLAUDE_CODE_OAUTH_TOKEN` (or set `ANTHROPIC_API_KEY`) in
-compose/Coolify secrets and re-run the two-turn smoke.
+Earlier same-day attempt (before API key): `401 OAuth access token has expired` —
+credential overlay already worked; auth was the only blocker.
 
-## Fact 3 — second-turn resume — **NOT PROVEN** (blocked by fact 2)
+## Fact 3 — second-turn resume — **PASS** (2026-11-21 re-prove)
 
-- Session store written: `~/.dsh/state/superagent/claude-sessions.json`.
-- Two failed turns for the same agent id kept the same Claude `session_id`
-  (`sameSession: true`), but no successful recall of prior user content
-  (both turns 401'd before assistant text).
-
-Re-prove after a fresh credential: turn1 ask for a nonce token; turn2 ask what
-the nonce was; require identical stored session id and matching reply.
+- Session store: `~/.dsh/state/superagent/claude-sessions.json`.
+- Same agent id across two `runTurn()` calls kept the same Claude `session_id`
+  (`sameSession: true`, id length 36).
+- Turn 1: remember a random nonce → assistant text confirmed.
+- Turn 2: ask for the nonce → reply matched (`containsNonce: true`).
 
 ## Blocker / next
 
-1. Rotate Claude OAuth (or API key) in the local/Coolify secret source.
-2. Re-run the two-turn `runTurn` smoke (or one UI session) for facts 2+3 green.
+1. ~~Rotate Claude OAuth (or API key)~~ — API key path proven for Phase 0 smoke.
+2. ~~Re-run the two-turn `runTurn` smoke~~ — facts 2+3 green.
 3. No design change; do not add parent-env credential workarounds.
+4. Phase 1 polish can proceed after supervisor review of this spike.

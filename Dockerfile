@@ -84,6 +84,8 @@ RUN chmod 0755 /usr/local/bin/gh-agent \
 COPY claude-code/managed-settings.json /etc/claude-code/managed-settings.json
 COPY claude-code/review-prompt.md prompts/delivery.md prompts/delivery-uat.md /usr/local/share/superagent/
 COPY roles/explorer.md roles/frontend.md roles/devops.md /usr/local/share/superagent/roles/
+# Target-owned scaffold tree for `superagent init` (F11.2).
+COPY templates/ /usr/local/share/superagent/templates/
 # Deployment-owned roles file + loader: render cordis.patch.yml at image build (F6.2).
 COPY superagent.yaml superagent.schema.json /usr/local/share/superagent/
 COPY scripts/superagent_config.py /usr/local/share/superagent/superagent_config.py

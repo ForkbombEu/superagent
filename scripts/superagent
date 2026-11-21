@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""superagent check/merge: next check for a PR head, or merge readiness.
+"""superagent check/merge/init: PR gates, or scaffold a target repository.
 
 `check` resolves repository, PR and head, then either prints the plan
 (`--dry-run`) or runs the next missing check under a per-PR lock.
 `merge` re-reads head and title, checks every Delivery merge condition, then
 squash-merges with `--match-head-commit` (or `--dry-run` reports only).
+`init` copies target-owned templates (AGENTS.md, UAT config, planning skills)
+into a caller-chosen directory.
 """
 import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -402,6 +405,74 @@ def run_merge():
     finish('PASS', sha, next_step='done')
 
 
+IMAGE_TEMPLATES = '/usr/local/share/superagent/templates'
+INIT_FILES = ('AGENTS.md', os.path.join('.superagent', 'uat.yaml'))
+INIT_TREES = (os.path.join('.agents', 'skills'),)
+
+
+def template_root():
+    """Resolve templates/: checkout next to scripts/, else image-baked copy."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    checkout = os.path.join(os.path.dirname(script_dir), 'templates')
+    if os.path.isdir(checkout):
+        return checkout
+    if os.path.isdir(IMAGE_TEMPLATES):
+        return IMAGE_TEMPLATES
+    fail(f'templates not found at {checkout} or {IMAGE_TEMPLATES}')
+
+
+def init_plan(root):
+    """Return (src, dest_rel) pairs under template root for init to copy."""
+    pairs = []
+    for rel in INIT_FILES:
+        src = os.path.join(root, rel)
+        if not os.path.isfile(src):
+            fail(f'template missing: {rel}')
+        pairs.append((src, rel))
+    for rel in INIT_TREES:
+        src = os.path.join(root, rel)
+        if not os.path.isdir(src):
+            fail(f'template missing: {rel}')
+        for dirpath, _dirnames, filenames in os.walk(src):
+            for name in filenames:
+                full = os.path.join(dirpath, name)
+                pairs.append((full, os.path.relpath(full, root)))
+    return pairs
+
+
+def run_init(target, force=False):
+    if not target:
+        fail(f'usage: {CHECK} init <dir> [--force]')
+    target = os.path.abspath(target)
+    if not os.path.isdir(target):
+        fail(f'target is not a directory: {target}')
+    root = template_root()
+    pairs = init_plan(root)
+    existing = [rel for _src, rel in pairs if os.path.lexists(os.path.join(target, rel))]
+    if existing and not force:
+        fail(f'refusing to overwrite existing path(s): {", ".join(existing)} (use --force)')
+    for src, rel in pairs:
+        dest = os.path.join(target, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(src, dest)
+    print(f'{CHECK} init: wrote {len(pairs)} file(s) into {target}')
+
+
+def parse_init_args(args):
+    force = False
+    positional = []
+    for arg in args:
+        if arg == '--force':
+            force = True
+            continue
+        if arg.startswith('-'):
+            fail(f'usage: {CHECK} init <dir> [--force]')
+        positional.append(arg)
+    if len(positional) != 1:
+        fail(f'usage: {CHECK} init <dir> [--force]')
+    return positional[0], force
+
+
 def main(args):
     if args == ['check', '--dry-run']:
         dry_run()
@@ -411,7 +482,14 @@ def main(args):
         dry_run_merge()
     if args == ['merge']:
         run_merge()
-    fail(f'usage: {CHECK} check [--dry-run] | merge [--dry-run]', checks.Exit.PRECONDITION)
+    if args and args[0] == 'init':
+        target, force = parse_init_args(args[1:])
+        run_init(target, force=force)
+        sys.exit(checks.Exit.PASS)
+    fail(
+        f'usage: {CHECK} check [--dry-run] | merge [--dry-run] | init <dir> [--force]',
+        checks.Exit.PRECONDITION,
+    )
 
 
 if __name__ == '__main__':

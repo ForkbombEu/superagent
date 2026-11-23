@@ -8,9 +8,10 @@ copied.
 
 ## Current path
 
-Claude chat in DSH is the owned thin plugin on `feat/claude-plugin`
-(`docs/claude-plugin.md` and phase notes there). Closed dead ends:
-draft Opus `/console` (#22) and third-party `@norman-else/dsh-claude` (#40).
+Claude chat in DSH is the owned thin plugin on `experiment/claude-plugin`
+(`docs/claude-plugin.md` and phase notes there; not Coolify's deploy tip).
+Closed dead ends: draft Opus `/console` (#22) and third-party
+`@norman-else/dsh-claude` (#40).
 
 ## Process
 

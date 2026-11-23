@@ -1,8 +1,9 @@
 # Agent notes — `experiment/claude-plugin`
 
 This checkout is the **`experiment/claude-plugin`** branch of
-[ForkbombEu/superagent](https://github.com/ForkbombEu/superagent). It is **not**
-the deployed tip. Coolify deploys **`attesta`**.
+[ForkbombEu/superagent](https://github.com/ForkbombEu/superagent). It is an
+experiment for Claude Code chat in DSH. The checks/roles/init backbone is
+**`experiment/superagent-delivery`** (formerly `attesta`).
 
 ## What this branch is
 
@@ -18,9 +19,9 @@ in the README section **Claude in DSH (`superagent-claude`)**.
 
 ## How to treat the branch
 
-- Do not merge to `attesta` or `main` unless a human explicitly asks.
+- Do not merge to `experiment/superagent-delivery` or `main` unless a human explicitly asks.
 - Prefer least new surface; keep credentials out of the DSH process (secrets
   file / Claude child `env` only).
 - Conventional Commits; keep the README dense.
 - Standing process notes for the repo (prefs, worktrees, subagents) are on
-  `attesta` under `docs/wiki/`.
+  `experiment/superagent-delivery` under `docs/wiki/`.

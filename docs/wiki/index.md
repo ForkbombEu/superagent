@@ -8,14 +8,15 @@ copied.
 
 ## Current path
 
-Claude chat in DSH is the owned thin plugin on `experiment/claude-plugin`
-(`docs/claude-plugin.md` and phase notes there; not Coolify's deploy tip).
+This wiki lives on `experiment/superagent-delivery` (formerly `attesta`):
+delivery checks, `superagent.yaml` / role presets, and `superagent init`.
+Claude chat in DSH is the sibling experiment `experiment/claude-plugin`.
 Closed dead ends: draft Opus `/console` (#22) and third-party
 `@norman-else/dsh-claude` (#40).
 
 ## Process
 
-- [Branches and deploys](branches-and-deploys.md): `attesta` is deployed by Coolify; features land by squash PR.
+- [Branches and deploys](branches-and-deploys.md): rename from `attesta`, Coolify retarget, worktree layout.
 - [User preferences](user-preferences.md): how Giovanni wants work done.
 - [Subagent workspace scope](subagent-workspace-scope.md): subagents' file tools only reach the chat's own worktree.
 - [Subagent context pressure](subagent-context-pressure.md): interrupt

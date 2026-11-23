@@ -1,5 +1,13 @@
 # DSH Superagent on Coolify
 
+> **Branch `experiment/superagent-delivery`** (formerly `attesta`). Experiment
+> tip for the feature-release work that shipped delivery checks, role/yaml
+> configuration, and target-repo init — not `main`. Plan:
+> [`docs/feature-release-plan.md`](docs/feature-release-plan.md). Agent-facing
+> summary: [`AGENTS.md`](AGENTS.md). Retarget Coolify from the old `attesta`
+> name to this branch (or to `main`) after the rename. Sibling experiment:
+> [`experiment/claude-plugin`](https://github.com/ForkbombEu/superagent/tree/experiment/claude-plugin).
+
 > Unofficial integration. This specifically targets Coolify's **Caddy**
 > reverse proxy. Traefik labels are different.
 

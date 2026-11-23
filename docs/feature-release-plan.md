@@ -1,5 +1,11 @@
 # Feature release plan: check tools, agent roles, Opus console
 
+> **Branch note (2026-11-23):** the backbone formerly called `attesta` is now
+> `experiment/superagent-delivery`. Historical “Verify on `attesta`” / D1 text
+> below still uses the old name. Shipped on this branch: F0–F6, F9, F11
+> (F7/F8/F10 skipped). Opus `/console` was parked; Claude-in-DSH continued on
+> `experiment/claude-plugin`.
+
 Sequenced from [extending-superagent.md](extending-superagent.md). Features
 are Gestalt L1 milestones, issues are L2 steps
 ([plan format](https://github.com/dyne/gestalt-agents/blob/HEAD/plugins/gestalt/skills/org-plan/references/plan-format.md)),

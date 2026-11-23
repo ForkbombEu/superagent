@@ -3,7 +3,9 @@
 Giovanni, as stated or shown on the dates given.
 
 - 2026-11-20 (handoff): Conventional Commits; dense README; least code to
-  maintain; Coolify must keep deploying `attesta`.
+  maintain; Coolify must keep deploying the chosen tip (was `attesta`;
+  renamed 2026-11-23 to `experiment/superagent-delivery` — retarget the app).
+- 2026-11-23: backbone branch renamed `attesta` → `experiment/superagent-delivery`.
 - 2026-11-20: preserve existing plans; put experiments in their own document
   rather than editing the plan.
 - 2026-11-20: wiki lives in the repo at `docs/wiki/`.

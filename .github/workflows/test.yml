@@ -3,7 +3,7 @@ name: test
 on:
   pull_request:
   push:
-    branches: [attesta, main]
+    branches: [experiment/superagent-delivery, main]
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}

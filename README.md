@@ -1,5 +1,14 @@
 # DSH Superagent on Coolify
 
+> **Branch `experiment/claude-plugin`.** Experiment, not Coolify's deploy tip.
+> Coolify deploys [`attesta`](https://github.com/ForkbombEu/superagent/tree/attesta).
+> This branch replaces third-party `@norman-else/dsh-claude` with an owned thin
+> DSH plugin, `superagent-claude` (`dsh/claude/`), so Claude Code chat runs in
+> the normal DSH UI on the repo checkout. Work order and phase notes:
+> [`docs/claude-plugin.md`](docs/claude-plugin.md). Agent-facing summary:
+> [`AGENTS.md`](AGENTS.md). Closed dead ends: Opus `/console` (#22), norman-else
+> path (#40).
+
 > Unofficial integration. This specifically targets Coolify's **Caddy**
 > reverse proxy. Traefik labels are different.
 

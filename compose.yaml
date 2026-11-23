@@ -57,6 +57,23 @@ services:
       - /run/superagent-secrets:uid=10001,gid=10001,mode=0700
     expose:
       - "3083"  # Docker-internal only; no host port mapping
+    # Explicit for Coolify Compose: one service without a healthcheck keeps the
+    # whole app at "Running (no healthcheck)", even if dashboard is healthy.
+    # Same probe as the root Dockerfile HEALTHCHECK (inner DSH on 3082).
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsS",
+          "-H",
+          "x-orchestrator-request: 1",
+          "http://127.0.0.1:3082/orchestrator/api/state",
+        ]
+      interval: 30s
+      timeout: 6s
+      start_period: 120s
+      retries: 4
 
   dashboard:
     build:
